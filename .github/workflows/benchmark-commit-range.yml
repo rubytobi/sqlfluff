@@ -100,6 +100,10 @@ jobs:
           fetch-depth: 0
           path: target
 
+      - name: Install target Python package
+        working-directory: target
+        run: pip install -e "." pytest pytest-xdist -q
+
       - name: Resolve commit range
         id: range
         working-directory: target
@@ -134,42 +138,33 @@ jobs:
             echo "::group::[$SHORT] $SUBJECT"
             git checkout --quiet "$SHA"
 
-            # ── Python install ─────────────────────────────────────────────
-            INSTALL_OK="true"
-            if ! pip install -e "." pytest pytest-xdist -q 2>&1 | tail -3; then
-              echo "::warning::pip install failed at $SHORT — skipping"
-              INSTALL_OK="false"
-            fi
-
             PYTEST_PASSED="0"
             PYTEST_FAILED="0"
             PYTEST_DURATION="n/a"
             BENCH_JSON="{}"
 
-            if [[ "$INSTALL_OK" == "true" ]]; then
+            # ── pytest parse_suite ─────────────────────────────────────────
+            POUT=$(pytest test/ -m "parse_suite" -n auto -q --tb=no \
+                     -p no:warnings --no-header 2>&1 || true)
+            echo "$POUT"
+            PYTEST_PASSED=$(echo "$POUT" | grep -oP '\d+(?= passed)' || echo 0)
+            PYTEST_FAILED=$(echo "$POUT"  | grep -oP '\d+(?= failed)' || echo 0)
+            PYTEST_DURATION=$(echo "$POUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)
 
-              # ── pytest parse_suite ───────────────────────────────────────
-              POUT=$(pytest test/ -m "parse_suite" -n auto -q --tb=no \
-                       -p no:warnings --no-header 2>&1 || true)
-              echo "$POUT"
-              PYTEST_PASSED=$(echo "$POUT" | grep -oP '\d+(?= passed)' || echo 0)
-              PYTEST_FAILED=$(echo "$POUT"  | grep -oP '\d+(?= failed)' || echo 0)
-              PYTEST_DURATION=$(echo "$POUT" | grep -oP '(?<=in )\d+\.\d+s' | head -1 || echo n/a)
+            # ── cargo bench — only when sqlfluffrs/ changed ────────────────
+            RUST_CHANGED="false"
+            if [[ -z "$PREV_SHA" ]]; then
+              RUST_CHANGED="true"
+            elif ! git diff --quiet "$PREV_SHA" "$SHA" -- sqlfluffrs/ 2>/dev/null; then
+              RUST_CHANGED="true"
+            fi
 
-              # ── cargo bench — only when sqlfluffrs/ changed ───────────────
-              RUST_CHANGED="false"
-              if [[ -z "$PREV_SHA" ]]; then
-                RUST_CHANGED="true"
-              elif ! git diff --quiet "$PREV_SHA" "$SHA" -- sqlfluffrs/ 2>/dev/null; then
-                RUST_CHANGED="true"
-              fi
+            if [[ "$RUST_CHANGED" == "true" && -d sqlfluffrs ]]; then
+              echo "Rust source changed — running cargo bench"
+              cargo bench --manifest-path sqlfluffrs/Cargo.toml --bench parser_bench \
+                2>&1 | tee /tmp/current_bench.txt || true
 
-              if [[ "$RUST_CHANGED" == "true" && -d sqlfluffrs ]]; then
-                echo "Rust source changed — running cargo bench"
-                cargo bench --manifest-path sqlfluffrs/Cargo.toml --bench parser_bench \
-                  2>&1 | tee /tmp/current_bench.txt || true
-
-                BENCH_JSON=$(python3 - << 'PY'
+              BENCH_JSON=$(python3 - << 'PY'
           import json, re
           scale = {"ns": 1, "µs": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
           results = {}
@@ -182,15 +177,13 @@ jobs:
               results[name] = round(value * scale.get(unit, 1))
           print(json.dumps(results))
           PY
-                )
-              else
-                echo "Rust source unchanged — skipping cargo bench"
-              fi
+              )
+            else
+              echo "Rust source unchanged — skipping cargo bench"
             fi
 
             # ── Append result as JSON line ─────────────────────────────────
             SHA="$SHA" SHORT="$SHORT" SUBJECT="$SUBJECT" \
-            INSTALL_OK="$INSTALL_OK" \
             PYTEST_PASSED="$PYTEST_PASSED" PYTEST_FAILED="$PYTEST_FAILED" \
             PYTEST_DURATION="$PYTEST_DURATION" \
             BENCH_JSON="$BENCH_JSON" \
@@ -198,10 +191,9 @@ jobs:
           import json, os
           e = os.environ
           data = {
-              'sha':        e['SHA'],
-              'short':      e['SHORT'],
-              'subject':    e['SUBJECT'],
-              'install_ok': e['INSTALL_OK'] == 'true',
+              'sha':     e['SHA'],
+              'short':   e['SHORT'],
+              'subject': e['SUBJECT'],
               'pytest': {
                   'passed':   int(e.get('PYTEST_PASSED')  or 0),
                   'failed':   int(e.get('PYTEST_FAILED')  or 0),
@@ -283,9 +275,8 @@ jobs:
               a("| Commit | Subject | ✅ Passed | ❌ Failed | Duration |")
               a("|--------|---------|----------:|----------:|----------|")
               for r in results:
-                  warn = " ⚠️ install failed" if not r.get("install_ok") else ""
                   pt = r.get("pytest", {})
-                  a(f"| `{r['short']}` | {r['subject'][:60]}{warn} "
+                  a(f"| `{r['short']}` | {r['subject'][:60]} "
                     f"| {pt.get('passed', '—')} | {pt.get('failed', '—')} "
                     f"| {pt.get('duration', '—')} |")
 
