@@ -2,9 +2,13 @@
 //!
 //! The TPC-H / TPC-DS query fixtures are intentionally NOT committed to this
 //! repository. Instead they are fetched at build time from the Apache Doris
-//! project at a pinned commit and cached under `OUT_DIR/tpc`. The fixtures path
-//! is exported to the crate as the `TPC_FIXTURES_DIR` env var (via
-//! `cargo:rustc-env`), so benches and examples can locate them with
+//! project at a pinned commit and cached under `.cache/tpc-fixtures/` in the
+//! workspace root — the same directory used by the Python pytest benchmarks in
+//! `test/benchmarks/conftest.py`. Whoever runs first (Python or Rust) downloads
+//! the files; the other finds them already cached. `.cache/` is gitignored.
+//!
+//! The fixtures path is exported to the crate as the `TPC_FIXTURES_DIR` env var
+//! (via `cargo:rustc-env`), so benches and examples can locate them with
 //! `env!("TPC_FIXTURES_DIR")`.
 //!
 //! Fetching only happens when the `fetch` feature is enabled. A normal
@@ -30,8 +34,17 @@ const TPCDS_SPLIT: [u32; 4] = [14, 23, 24, 39];
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let fixtures_dir = out_dir.join("tpc");
+    // Resolve the workspace root from CARGO_MANIFEST_DIR (this crate's dir is
+    // sqlfluffrs/sqlfluffrs_benchmarks/, so the workspace root is two levels up).
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
+    );
+    let fixtures_dir = manifest_dir
+        .parent() // sqlfluffrs/
+        .and_then(|p| p.parent()) // repo root
+        .expect("unexpected directory layout")
+        .join(".cache")
+        .join("tpc-fixtures");
 
     // Always export the location so the crate compiles whether or not fixtures
     // have been fetched.
