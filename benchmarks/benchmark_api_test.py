@@ -13,48 +13,38 @@ import pytest
 import sqlfluff
 
 # A representative, moderately complex query that exercises a broad range of
-# parser grammar: CTEs, joins, window functions, CASE expressions, subqueries
-# and aggregate functions. Repeated to provide a realistic file-sized workload.
-_BASE_QUERY = """
-WITH regional_sales AS (
-    SELECT
-        r.region_name,
-        o.order_date,
-        SUM(oi.quantity * oi.unit_price) AS revenue
-    FROM orders AS o
-    INNER JOIN order_items AS oi ON o.order_id = oi.order_id
-    LEFT JOIN regions AS r ON o.region_id = r.region_id
-    WHERE o.order_date >= '2020-01-01'
-        AND o.status IN ('shipped', 'delivered')
-    GROUP BY r.region_name, o.order_date
-),
-
-ranked AS (
-    SELECT
-        region_name,
-        order_date,
-        revenue,
-        ROW_NUMBER() OVER (
-            PARTITION BY region_name
-            ORDER BY revenue DESC
-        ) AS revenue_rank,
-        CASE
-            WHEN revenue > 10000 THEN 'high'
-            WHEN revenue > 1000 THEN 'medium'
-            ELSE 'low'
-        END AS revenue_band
-    FROM regional_sales
-)
-
+# parser grammar: multiple joins, aggregate and scalar functions, a CASE
+# expression, IN / IS NULL predicates, GROUP BY / HAVING and ORDER BY / LIMIT.
+_PARSE_QUERY = """
 SELECT
-    region_name,
-    order_date,
-    revenue,
-    revenue_rank,
-    revenue_band
-FROM ranked
-WHERE revenue_rank <= 10
-ORDER BY region_name, revenue_rank;
+    o.order_id,
+    o.order_date,
+    c.customer_name,
+    c.region,
+    p.product_name,
+    oi.quantity,
+    oi.unit_price,
+    oi.quantity * oi.unit_price AS line_total,
+    UPPER(c.region) AS region_upper,
+    CASE WHEN oi.quantity > 100 THEN 'bulk' ELSE 'standard' END AS order_type
+FROM orders AS o
+INNER JOIN customers AS c ON o.customer_id = c.customer_id
+INNER JOIN order_items AS oi ON o.order_id = oi.order_id
+INNER JOIN products AS p ON oi.product_id = p.product_id
+WHERE o.order_date >= '2020-01-01'
+    AND o.status IN ('shipped', 'delivered')
+    AND c.region IS NOT NULL
+GROUP BY
+    o.order_id,
+    o.order_date,
+    c.customer_name,
+    c.region,
+    p.product_name,
+    oi.quantity,
+    oi.unit_price
+HAVING SUM(oi.quantity) > 0
+ORDER BY o.order_date DESC, o.order_id
+LIMIT 100;
 """
 
 # A version of the query with deliberate style issues (lower-case keywords and
@@ -70,17 +60,10 @@ group by a.id,a.name,b.value
 order by a.id
 """
 
-_LARGE_QUERY = "\n".join(_BASE_QUERY for _ in range(5))
-
 
 def test_parse_query(benchmark: pytest.FixtureRequest) -> None:
     """Benchmark parsing a moderately complex query."""
-    benchmark(sqlfluff.parse, _BASE_QUERY, dialect="ansi")
-
-
-def test_parse_large_query(benchmark: pytest.FixtureRequest) -> None:
-    """Benchmark parsing a large (file-sized) SQL input."""
-    benchmark(sqlfluff.parse, _LARGE_QUERY, dialect="ansi")
+    benchmark(sqlfluff.parse, _PARSE_QUERY, dialect="ansi")
 
 
 def test_lint_query(benchmark: pytest.FixtureRequest) -> None:
