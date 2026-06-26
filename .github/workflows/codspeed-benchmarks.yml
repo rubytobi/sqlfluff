@@ -160,11 +160,33 @@ jobs:
       - name: Install benchmark dependencies
         run: uv pip install --system pytest pytest-codspeed pytest-benchmark
 
-      - name: Run Python benchmarks via CodSpeed
+      # Run each benchmark in its own CodSpeed step so the Valgrind callgraph
+      # is processed per-benchmark rather than all at once.  A single run that
+      # covers all four TPC tests accumulates ~80 min of callgrind data, which
+      # overflows the runner's memory and causes a segfault (exit 139).
+      - name: Benchmark lex_tpch via CodSpeed
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
-          run: pytest test/benchmarks/ --codspeed -v
+          run: pytest test/benchmarks/ -k test_lex_tpch --codspeed -v
+
+      - name: Benchmark parse_tpch via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: pytest test/benchmarks/ -k test_parse_tpch --codspeed -v
+
+      - name: Benchmark lex_tpcds via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: pytest test/benchmarks/ -k test_lex_tpcds --codspeed -v
+
+      - name: Benchmark parse_tpcds via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: pytest test/benchmarks/ -k test_parse_tpcds --codspeed -v
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Rust benchmarks.
