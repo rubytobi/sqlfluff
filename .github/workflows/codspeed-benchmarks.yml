@@ -264,8 +264,8 @@ jobs:
         benchmark:
           - lex_tpch_22
           - parse_tpch_22
-          - lex_tpcds_99
-          - parse_tpcds_99
+          - lex_tpcds_22
+          - parse_tpcds_22
 
     steps:
       - name: Checkout target commit (Rust source under test)
