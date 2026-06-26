@@ -1,0 +1,139 @@
+######################################
+## CodSpeed Performance Benchmarks  ##
+######################################
+#
+# Manually triggered workflow that checks out a specific commit and runs
+# CodSpeed benchmarks to measure wall time, memory consumption, and
+# instruction counts.
+#
+# Usage (GitHub UI → Actions → CodSpeed Performance Benchmarks → Run workflow):
+#   commit_sha: the full or abbreviated SHA to benchmark, e.g. "abc1234"
+#
+# Secrets required:
+#   CODSPEED_TOKEN – repository/organisation CodSpeed API token
+#
+name: CodSpeed Performance Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Commit SHA to check out and benchmark'
+        required: true
+        type: string
+
+# One run per SHA at a time; never cancel an in-progress benchmark because
+# partial results confuse CodSpeed's baseline comparison.
+concurrency:
+  group: codspeed-${{ inputs.commit_sha }}
+  cancel-in-progress: false
+
+jobs:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Python benchmarks – measured by CodSpeed via pytest-codspeed.
+  # ─────────────────────────────────────────────────────────────────────────────
+  python-benchmarks:
+    name: Python Benchmarks (wall time · memory · instructions)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            requirements_dev.txt
+            pyproject.toml
+            constraints/*.txt
+
+      - name: Install sqlfluff and benchmark dependencies
+        run: |
+          uv pip install --system -e .
+          uv pip install --system pytest pytest-codspeed pytest-benchmark
+
+      - name: Run Python benchmarks via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          run: pytest test/ --codspeed -v
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Rust benchmarks – measured by CodSpeed via cargo bench.
+  #
+  # NOTE: Per-benchmark granularity in CodSpeed requires replacing
+  # `criterion` with `codspeed-criterion-compat` in Cargo.toml and
+  # using `cargo codspeed build && cargo codspeed run`.
+  # Until that migration is done CodSpeed measures aggregate wall time
+  # and instruction counts for the full bench binary invocation.
+  # ─────────────────────────────────────────────────────────────────────────────
+  rust-benchmarks:
+    name: Rust Benchmarks (wall time · memory · instructions)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            requirements_dev.txt
+            pyproject.toml
+            constraints/*.txt
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "sqlfluffrs"
+          cache-on-failure: true
+
+      - name: Generate Rust dialect files
+        run: |
+          uv pip install --system -e .
+          python utils/rustify.py build
+
+      - name: Run parser_bench via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          working-directory: sqlfluffrs
+          run: cargo bench --bench parser_bench
+
+      - name: Run baseline_phase1 via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          working-directory: sqlfluffrs
+          run: cargo bench --bench baseline_phase1
+
+      - name: Run delimited_performance via CodSpeed
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          working-directory: sqlfluffrs
+          run: cargo bench --bench delimited_performance
