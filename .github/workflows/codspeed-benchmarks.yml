@@ -261,19 +261,50 @@ jobs:
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed
 
-      - name: Run parser_bench via CodSpeed
+      - name: Benchmark parser_bench via CodSpeed
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
           working-directory: sqlfluffrs
           run: cargo codspeed build --bench parser_bench && cargo codspeed run --bench parser_bench
 
-      - name: Run tpc_bench via CodSpeed
-        # tpc_bench and sqlfluffrs_benchmarks may not exist in older commits.
+      # Build tpc_bench once; each run step below re-uses the cached binary.
+      # tpc_bench and sqlfluffrs_benchmarks may not exist in older commits, so
+      # all four steps are continue-on-error.
+      - name: Build tpc_bench
+        continue-on-error: true
+        working-directory: sqlfluffrs
+        # No --features fetch: fixtures are already in .cache/tpc-fixtures/
+        run: cargo codspeed build -p sqlfluffrs_benchmarks --bench tpc_bench
+
+      - name: Benchmark tpch/lex_tpch_22 via CodSpeed
         continue-on-error: true
         uses: CodSpeedHQ/action@v3
         with:
           token: ${{ secrets.CODSPEED_TOKEN }}
           working-directory: sqlfluffrs
-          # No --features fetch: fixtures are already in .cache/tpc-fixtures/
-          run: cargo codspeed build -p sqlfluffrs_benchmarks --bench tpc_bench && cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench
+          run: cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- lex_tpch_22
+
+      - name: Benchmark tpch/parse_tpch_22 via CodSpeed
+        continue-on-error: true
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          working-directory: sqlfluffrs
+          run: cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- parse_tpch_22
+
+      - name: Benchmark tpcds/lex_tpcds_99 via CodSpeed
+        continue-on-error: true
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          working-directory: sqlfluffrs
+          run: cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- lex_tpcds_99
+
+      - name: Benchmark tpcds/parse_tpcds_99 via CodSpeed
+        continue-on-error: true
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          working-directory: sqlfluffrs
+          run: cargo codspeed run -p sqlfluffrs_benchmarks --bench tpc_bench -- parse_tpcds_99
