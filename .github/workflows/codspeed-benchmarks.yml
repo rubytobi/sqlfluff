@@ -258,6 +258,7 @@ jobs:
           mkdir -p /tmp/callgrind
           BENCH_BIN=$(ls target/release/deps/parser_bench-* | grep -v '\.d$' | head -1)
           CODSPEED_ENV=runner \
+          CODSPEED_CARGO_WORKSPACE_ROOT=${{ github.workspace }}/sqlfluffrs \
           valgrind -q \
             --tool=callgrind \
             --callgrind-out-file=/tmp/callgrind/callgrind.out \
@@ -364,6 +365,7 @@ jobs:
           mkdir -p /tmp/callgrind
           BENCH_BIN=$(ls target/release/deps/tpc_bench-* | grep -v '\.d$' | head -1)
           CODSPEED_ENV=runner \
+          CODSPEED_CARGO_WORKSPACE_ROOT=${{ github.workspace }}/sqlfluffrs \
           valgrind -q \
             --tool=callgrind \
             --callgrind-out-file=/tmp/callgrind/callgrind.out \
