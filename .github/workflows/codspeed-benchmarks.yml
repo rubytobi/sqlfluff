@@ -198,11 +198,13 @@ jobs:
           echo "──────────────────────────────────────"
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Rust parser_bench.
+  # Rust parser_bench — Valgrind callgrind.
   #
-  # Benchmarks simple and complex SQL queries through the Rust parser.
-  # Uses only committed fixture files (test/fixtures/dialects/ansi/), so it
-  # does not depend on fetch-tpc-fixtures and can start immediately.
+  # codspeed_criterion_compat detects CODSPEED_ENV=runner and runs each
+  # benchmark exactly once wrapped in CALLGRIND_START/STOP_INSTRUMENTATION,
+  # so --instr-atstart=no scopes the instruction count to the hot path only.
+  # We build the binary separately then invoke it under Valgrind directly —
+  # no cargo-codspeed or CodSpeed account required.
   # ─────────────────────────────────────────────────────────────────────────────
   rust-parser-bench:
     name: Rust – parser_bench
@@ -243,12 +245,44 @@ jobs:
           uv pip install --system -e .
           python utils/rustify.py build
 
-      - name: Run parser_bench
+      - name: Install Valgrind
+        run: sudo apt-get update -q && sudo apt-get install -y valgrind
+
+      - name: Build parser_bench
         working-directory: sqlfluffrs
-        run: cargo bench --bench parser_bench
+        run: cargo build --release --bench parser_bench
+
+      - name: Run parser_bench under Valgrind callgrind
+        working-directory: sqlfluffrs
+        run: |
+          mkdir -p /tmp/callgrind
+          BENCH_BIN=$(ls target/release/deps/parser_bench-* | grep -v '\.d$' | head -1)
+          CODSPEED_ENV=runner \
+          valgrind -q \
+            --tool=callgrind \
+            --callgrind-out-file=/tmp/callgrind/callgrind.out \
+            --instr-atstart=no \
+            --combine-dumps=yes \
+            --dump-line=no \
+            "$BENCH_BIN"
+
+      - name: Print instruction-count summary
+        if: always()
+        working-directory: sqlfluffrs
+        run: |
+          echo "──────────────────────────────────────"
+          echo "Benchmark : parser_bench"
+          awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
+            /tmp/callgrind/callgrind.out
+          echo "──────────────────────────────────────"
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Rust tpc_bench — one matrix job per benchmark.
+  # Rust tpc_bench — one matrix job per benchmark, Valgrind callgrind.
+  #
+  # Same approach as rust-parser-bench: build the binary, run it under Valgrind
+  # with CODSPEED_ENV=runner so codspeed_criterion_compat executes exactly one
+  # instrumented iteration per benchmark function.  The filter argument after
+  # -- selects which benchmark function runs in this matrix slot.
   #
   # The Rust source to compile comes from commit_sha.  build.rs is overlaid
   # from the workflow branch so that TPC_FIXTURES_DIR always resolves to
@@ -317,6 +351,32 @@ jobs:
           uv pip install --system -e .
           python utils/rustify.py build
 
-      - name: Run ${{ matrix.benchmark }}
+      - name: Install Valgrind
+        run: sudo apt-get update -q && sudo apt-get install -y valgrind
+
+      - name: Build tpc_bench
         working-directory: sqlfluffrs
-        run: cargo bench -p sqlfluffrs_benchmarks --bench tpc_bench -- ${{ matrix.benchmark }}
+        run: cargo build --release -p sqlfluffrs_benchmarks --bench tpc_bench
+
+      - name: Run ${{ matrix.benchmark }} under Valgrind callgrind
+        working-directory: sqlfluffrs
+        run: |
+          mkdir -p /tmp/callgrind
+          BENCH_BIN=$(ls target/release/deps/tpc_bench-* | grep -v '\.d$' | head -1)
+          CODSPEED_ENV=runner \
+          valgrind -q \
+            --tool=callgrind \
+            --callgrind-out-file=/tmp/callgrind/callgrind.out \
+            --instr-atstart=no \
+            --combine-dumps=yes \
+            --dump-line=no \
+            "$BENCH_BIN" ${{ matrix.benchmark }}
+
+      - name: Print instruction-count summary
+        if: always()
+        run: |
+          echo "──────────────────────────────────────"
+          echo "Benchmark : ${{ matrix.benchmark }}"
+          awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
+            /tmp/callgrind/callgrind.out
+          echo "──────────────────────────────────────"
