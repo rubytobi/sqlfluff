@@ -74,6 +74,11 @@ on:
         required: false
         type: string
         default: '19'
+      max_queries:
+        description: 'Number of queries to run per benchmark (Q0–Q{N-1}) for all four TPC suites'
+        required: false
+        type: string
+        default: '20'
 
 concurrency:
   group: benchmarks-${{ inputs.commit_sha }}
@@ -199,8 +204,8 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Python benchmarks — max_parallel runners, each assigned a round-robin slice
-  # of all 40 (benchmark × query) combinations.  Combinations are ordered as:
-  #   lex_tpch Q0–Q9, parse_tpch Q0–Q9, lex_tpcds Q0–Q9, parse_tpcds Q0–Q9
+  # of all (4 × max_queries) combinations.  Combinations are ordered as:
+  #   lex_tpch Q0–Q{N-1}, parse_tpch Q0–Q{N-1}, lex_tpcds Q0–Q{N-1}, parse_tpcds Q0–Q{N-1}
   # Runner r handles indices r, r+max_parallel, r+2×max_parallel, …  running
   # them sequentially.  Every runner carries ~equal total work so all finish
   # at roughly the same time with no straggler holding back the group.
@@ -247,7 +252,7 @@ jobs:
           # Build ordered list of all (benchmark, query_idx) combinations.
           declare -a combos
           for bench in test_lex_tpch test_parse_tpch test_lex_tpcds test_parse_tpcds; do
-            max_q=9
+            max_q=$(( ${{ inputs.max_queries }} - 1 ))
             for ((q=0; q<=max_q; q++)); do combos+=("${bench}:${q}"); done
           done
 
@@ -284,31 +289,29 @@ jobs:
             } | tee "/tmp/bench-stats/python-${bench}-q${qidx}.txt"
             echo "──────────────────────────────────────"
 
-            # Also collect peak heap bytes for queries 0–9 via massif.
-            if [[ $qidx -le 9 ]]; then
-              echo "━━━ $bench Q$qidx (mem) ━━━"
-              mkdir -p /tmp/massif
-              unset TPCH_QUERY_IDX TPCDS_QUERY_IDX
-              if [[ "$bench" == *tpcds* ]]; then
-                export TPCDS_QUERY_IDX=$qidx
-              else
-                export TPCH_QUERY_IDX=$qidx
-              fi
-              PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
-              valgrind -q \
-                --tool=massif \
-                --massif-out-file=/tmp/massif/massif.out \
-                --pages-as-heap=no \
-                .bench-venv/bin/python -m pytest test/benchmarks/ \
-                  -k "$bench" -v --benchmark-disable -p no:codspeed \
-                || echo "::warning::$bench Q$qidx mem failed, continuing"
-              {
-                echo "Benchmark: $bench Q$qidx (peak heap)"
-                peak=$(grep '^mem_heap_B=' /tmp/massif/massif.out | cut -d= -f2 | sort -n | tail -1)
-                awk -v n="${peak:-0}" 'BEGIN { printf "Peak heap B: %'"'"'d\n", n }'
-              } | tee "/tmp/bench-stats/python-mem-${bench}-q${qidx}.txt"
-              echo "──────────────────────────────────────"
+            # Also collect peak heap bytes via massif.
+            echo "━━━ $bench Q$qidx (mem) ━━━"
+            mkdir -p /tmp/massif
+            unset TPCH_QUERY_IDX TPCDS_QUERY_IDX
+            if [[ "$bench" == *tpcds* ]]; then
+              export TPCDS_QUERY_IDX=$qidx
+            else
+              export TPCH_QUERY_IDX=$qidx
             fi
+            PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
+            valgrind -q \
+              --tool=massif \
+              --massif-out-file=/tmp/massif/massif.out \
+              --pages-as-heap=no \
+              .bench-venv/bin/python -m pytest test/benchmarks/ \
+                -k "$bench" -v --benchmark-disable -p no:codspeed \
+              || echo "::warning::$bench Q$qidx mem failed, continuing"
+            {
+              echo "Benchmark: $bench Q$qidx (peak heap)"
+              peak=$(grep '^mem_heap_B=' /tmp/massif/massif.out | cut -d= -f2 | sort -n | tail -1)
+              awk -v n="${peak:-0}" 'BEGIN { printf "Peak heap B: %'"'"'d\n", n }'
+            } | tee "/tmp/bench-stats/python-mem-${bench}-q${qidx}.txt"
+            echo "──────────────────────────────────────"
           done
 
       - name: Upload bench stats
