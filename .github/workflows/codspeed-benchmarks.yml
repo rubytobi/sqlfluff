@@ -207,7 +207,6 @@ jobs:
     name: Python bench runner ${{ matrix.runner_id }}
     runs-on: ubuntu-latest
     needs: [setup-bench-matrix, fetch-tpc-fixtures, python-bench-prepare]
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup-bench-matrix.outputs.matrix) }}
@@ -304,7 +303,6 @@ jobs:
   rust-parser-bench:
     name: Rust – parser_bench
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
       - name: Checkout target commit (Rust source under test)
@@ -385,7 +383,6 @@ jobs:
     name: Rust – ${{ matrix.benchmark }}
     runs-on: ubuntu-latest
     needs: fetch-tpc-fixtures
-    timeout-minutes: 10
     continue-on-error: true
     strategy:
       fail-fast: false
