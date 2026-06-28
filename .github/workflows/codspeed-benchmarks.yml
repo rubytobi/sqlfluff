@@ -24,32 +24,35 @@
 #
 #   fetch-tpc-fixtures   python-bench-prepare    setup-bench-matrix
 #   (uploads artifact)   (builds venv, caches)   (emits runner IDs)
-#          │                    │                       │
-#          └──────────┬─────────┘                       │
-#                     └─────────────────────────────────┘
-#                                     ▼
-#       setup-bench-matrix──────────────────────────────────────┐
-#              │                                                 │
-#              ▼                                                 │
-#          python-bench (max_parallel runners,      rust-tpc-benchmarks
-#          each running a round-robin slice          (single job, all 4
-#          of all (4×max_queries) combinations):     groups in one run:
-#            runner 0: combos 0, 20, 40, …           lex_tpch
-#            runner 1: combos 1, 21, 41, …           parse_tpch
-#            …                                       lex_tpcds
-#            runner N-1: combos N-1, 2N-1, …         parse_tpcds)
-#                     │                               │
-#                     └──────────────┬────────────────┘
-#                                    ▼
-#                             bench-summary
-#                             (aggregates all stats)
+#          │                    │                  │        │
+#          └──────────┬─────────┘                  │        │
+#                     ├────────────────────────────┘        │
+#                     │                        ┌────────────┘
+#                     ▼                        ▼
+#        python-walltime-bench     python-bench (max_parallel runners,
+#        (1 job, all               each a round-robin slice of all
+#         max_queries × 4          (4×max_queries) combinations):
+#         combinations,              runner 0: combos 0, 20, 40, …
+#         no Valgrind)               runner 1: combos 1, 21, 41, …
+#                     │              …
+#                     │              runner N-1: combos N-1, 2N-1, …
+#                     │                        │
+#                     └────────────┬───────────┘
+#                                  │         rust-tpc-benchmarks
+#                                  │         (single job, all 4 groups)
+#                                  ├──────────────────────────────────┘
+#                                  ▼
+#                           bench-summary
+#                           (aggregates all stats)
 #
-# Python benchmarks run under stock Valgrind callgrind with default
-# --instr-atstart=yes.  pytest-codspeed is disabled (-p no:codspeed) and
-# --benchmark-disable is passed so each benchmark function runs exactly once
-# without timing overhead; callgrind counts all instructions for the full run.
-# For queries 0–9, each runner also re-runs the benchmark under --tool=massif
-# and records the peak heap bytes (python-mem-* stat files).
+# Python benchmarks run in two passes:
+#   1. Instruction + memory (callgrind + massif via python-bench): Valgrind
+#      callgrind with --instr-atstart=yes counts all instructions; massif
+#      records peak heap.  pytest-codspeed disabled; --benchmark-disable
+#      prevents timing so each function runs exactly once.
+#   2. Wall time (python-walltime-bench): pytest-benchmark native timing with
+#      no Valgrind, multiple rounds per query, reports median ms.  Limited to
+#      max_queries × 4 combinations (one job, no round-robin fan-out).
 #
 # Rust benchmarks use iai-callgrind, which manages Valgrind internally and
 # produces per-function instruction counts with setup code excluded from
@@ -448,13 +451,103 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # Python wall-time benchmarks — pytest-benchmark, no Valgrind.
+  #
+  # Runs all (4 × max_queries) (benchmark × query) combinations in a single
+  # job without any Valgrind overhead.  pytest-benchmark records median, mean,
+  # and min wall-clock time over multiple rounds and writes a JSON artifact;
+  # this step converts each JSON to a simple text file parseable by bench-summary.
+  #
+  # Runs in parallel with python-bench and rust-tpc-benchmarks.
+  # ─────────────────────────────────────────────────────────────────────────────
+  python-walltime-bench:
+    name: Python – wall-time benchmarks
+    runs-on: ubuntu-latest
+    needs: [fetch-tpc-fixtures, python-bench-prepare]
+
+    steps:
+      - name: Checkout workflow branch (benchmark infrastructure)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Download TPC fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: tpc-fixtures
+          path: .cache/tpc-fixtures/
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Restore benchmark virtual environment
+        uses: actions/cache/restore@v4
+        with:
+          path: .bench-venv
+          key: bench-venv-${{ runner.os }}-py3.14-${{ inputs.commit_sha }}
+          fail-on-cache-miss: true
+
+      - name: Run wall-time benchmark batch
+        run: |
+          mkdir -p /tmp/bench-stats
+
+          # JSON-to-text converter — written once, called per (bench, query).
+          cat > /tmp/wt_convert.py << 'PYEOF'
+          import json, sys, pathlib
+          bench, q = sys.argv[1], sys.argv[2]
+          f = pathlib.Path(f'/tmp/bench-stats/python-walltime-{bench}-q{q}.json')
+          if not f.exists():
+              sys.exit(0)
+          data = json.loads(f.read_text())
+          if not data.get('benchmarks'):
+              sys.exit(0)
+          s = data['benchmarks'][0]['stats']
+          print(f'Benchmark: {bench} Q{q} (wall time)')
+          print(f'Median ms: {s["median"] * 1000:.3f}')
+          print(f'Mean ms: {s["mean"] * 1000:.3f}')
+          print(f'Min ms: {s["min"] * 1000:.3f}')
+          print(f'Rounds: {s["rounds"]}')
+          PYEOF
+
+          for bench in test_lex_tpch test_parse_tpch test_lex_tpcds test_parse_tpcds; do
+            max_q=$(( ${{ inputs.max_queries }} - 1 ))
+            for ((q=0; q<=max_q; q++)); do
+              echo "━━━ $bench Q$q (wall time) ━━━"
+              unset TPCH_QUERY_IDX TPCDS_QUERY_IDX
+              if [[ "$bench" == *tpcds* ]]; then
+                export TPCDS_QUERY_IDX=$q
+              else
+                export TPCH_QUERY_IDX=$q
+              fi
+              PYTHONHASHSEED=0 \
+              .bench-venv/bin/python -m pytest test/benchmarks/ \
+                -k "$bench" -v \
+                --benchmark-json=/tmp/bench-stats/python-walltime-${bench}-q${q}.json \
+                || echo "::warning::$bench Q$q walltime failed, continuing"
+              python3 /tmp/wt_convert.py "$bench" "$q" \
+                | tee /tmp/bench-stats/python-walltime-${bench}-q${q}.txt || true
+              echo "──────────────────────────────────────"
+            done
+          done
+
+      - name: Upload bench stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-stats-python-walltime
+          path: /tmp/bench-stats/python-walltime-*.txt
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Aggregate all per-job stat artifacts into a single summary.
   # Runs even if individual bench jobs fail (if: always()).
   # ─────────────────────────────────────────────────────────────────────────────
   bench-summary:
     name: Benchmark Summary
     runs-on: ubuntu-latest
-    needs: [python-bench, rust-tpc-benchmarks]
+    needs: [python-bench, python-walltime-bench, rust-tpc-benchmarks]
     if: always()
 
     steps:
@@ -606,6 +699,59 @@ jobs:
                 "${mem_data[test_parse_tpch|${q}]:-—}" \
                 "${mem_data[test_lex_tpcds|${q}]:-—}" \
                 "${mem_data[test_parse_tpcds|${q}]:-—}"
+            done
+            echo "═══════════════════════════════════════════════════════════════"
+          fi
+
+          # ── Parse Python wall-time stat files ────────────────────
+          declare -A wt_data
+          for f in bench-stats/python-walltime-test_*-q*.txt; do
+            base=$(basename "$f" .txt)          # python-walltime-test_lex_tpch-q0
+            bench="${base#python-walltime-}"    # test_lex_tpch-q0
+            q="${bench##*-q}"                   # 0
+            bench="${bench%-q*}"                # test_lex_tpch
+            median=$(grep '^Median ms:' "$f" | awk '{print $NF}') || median=""
+            wt_data["${bench}|${q}"]="${median:-—}"
+          done
+
+          wt_qs=()
+          for key in "${!wt_data[@]}"; do wt_qs+=("${key##*|}"); done
+          mapfile -t wt_qs < <(printf '%s\n' "${wt_qs[@]}" | sort -un)
+
+          if [[ ${#wt_qs[@]} -gt 0 ]]; then
+            # ── Markdown wall-time table → GitHub Step Summary ────────
+            {
+              echo "## Python Benchmark Results (wall time, ms)"
+              echo ""
+              echo "Median wall-clock time per call (milliseconds), measured by pytest-benchmark running natively without Valgrind. Affected by machine load and CPU state — use for order-of-magnitude comparisons; prefer instruction counts for regression detection."
+              echo ""
+              echo "| Q | lex_tpch | parse_tpch | lex_tpcds | parse_tpcds |"
+              echo "|---|----------|------------|-----------|-------------|"
+              for q in "${wt_qs[@]}"; do
+                printf "| %s" "$q"
+                for b in "${benchmarks[@]}"; do
+                  printf " | %s" "${wt_data[${b}|${q}]:-—}"
+                done
+                echo " |"
+              done
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            # ── Plain-text wall-time table → log ─────────────────────
+            echo ""
+            echo "═══════════════════════════════════════════════════════════════"
+            echo "                  Wall time / ms (median)"
+            echo "───────────────────────────────────────────────────────────────"
+            printf "%-3s  %-${W}s %-${W}s %-${W}s %-${W}s\n" \
+              "Q" "lex_tpch" "parse_tpch" "lex_tpcds" "parse_tpcds"
+            echo "───────────────────────────────────────────────────────────────"
+            for q in "${wt_qs[@]}"; do
+              printf "%-3s  %-${W}s %-${W}s %-${W}s %-${W}s\n" \
+                "$q" \
+                "${wt_data[test_lex_tpch|${q}]:-—}" \
+                "${wt_data[test_parse_tpch|${q}]:-—}" \
+                "${wt_data[test_lex_tpcds|${q}]:-—}" \
+                "${wt_data[test_parse_tpcds|${q}]:-—}"
             done
             echo "═══════════════════════════════════════════════════════════════"
           fi
