@@ -22,21 +22,21 @@
 #
 # Job graph:
 #
-#   fetch-tpc-fixtures   python-bench-prepare    rust-parser-bench   setup-bench-matrix
-#   (uploads artifact)   (builds venv, caches)   (no fixtures needed) (emits runner IDs)
-#          │                    │                                            │
-#          └──────────┬─────────┘                                           │
-#                     └─────────────────────────────────────────────────────┘
-#                                           ▼
-#       setup-bench-matrix────────────────────────────────────────┐
-#              │                                                   │
-#              ▼                                                   │
-#          python-bench (max_parallel runners,        rust-tpc-benchmarks
-#          each running a round-robin slice            (4 jobs in parallel)
-#          of all 242 combinations):                   lex_tpch
-#            runner 0: combos 0, 20, 40, …             parse_tpch
-#            runner 1: combos 1, 21, 41, …             lex_tpcds
-#            …                                         parse_tpcds
+#   fetch-tpc-fixtures   python-bench-prepare    setup-bench-matrix
+#   (uploads artifact)   (builds venv, caches)   (emits runner IDs)
+#          │                    │                       │
+#          └──────────┬─────────┘                       │
+#                     └─────────────────────────────────┘
+#                                     ▼
+#       setup-bench-matrix──────────────────────────────────────┐
+#              │                                                 │
+#              ▼                                                 │
+#          python-bench (max_parallel runners,      rust-tpc-benchmarks
+#          each running a round-robin slice          (4 jobs in parallel)
+#          of all (4×max_queries) combinations):     lex_tpch
+#            runner 0: combos 0, 20, 40, …           parse_tpch
+#            runner 1: combos 1, 21, 41, …           lex_tpcds
+#            …                                       parse_tpcds
 #            runner N-1: combos N-1, 2N-1, …
 #                     │                               │
 #                     └──────────────┬────────────────┘
@@ -323,84 +323,6 @@ jobs:
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Rust parser_bench — iai-callgrind.
-  #
-  # iai-callgrind manages Valgrind internally: it builds the bench binary, then
-  # the iai-callgrind-runner invokes each benchmark function once under
-  # callgrind with --instr-atstart=no, so only the benchmark body is counted.
-  # The runner version must exactly match the iai-callgrind library version.
-  # ─────────────────────────────────────────────────────────────────────────────
-  rust-parser-bench:
-    name: Rust – parser_bench
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout target commit (Rust source under test)
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.commit_sha }}
-          fetch-depth: 1
-
-      - name: Overlay benchmark infrastructure from workflow branch
-        run: |
-          git fetch origin ${{ github.ref_name }} --depth=1
-          git checkout FETCH_HEAD -- \
-            sqlfluffrs/Cargo.toml \
-            sqlfluffrs/benches/parser_bench.rs
-
-      - name: Set up Python 3.14
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.14'
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-          cache-dependency-glob: |
-            requirements_dev.txt
-            pyproject.toml
-            constraints/*.txt
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "sqlfluffrs"
-          cache-on-failure: true
-
-      - name: Generate Rust dialect files
-        run: |
-          uv pip install --system -e .
-          python utils/rustify.py build
-
-      - name: Install Valgrind
-        run: sudo apt-get update -q && sudo apt-get install -y valgrind
-
-      - name: Install iai-callgrind-runner
-        working-directory: sqlfluffrs
-        run: |
-          version=$(cargo metadata --format-version 1 \
-            | python3 -c "import sys,json; m=json.load(sys.stdin); print(next(p['version'] for p in m['packages'] if p['name']=='iai-callgrind'))")
-          cargo install iai-callgrind-runner --version "$version"
-
-      - name: Run parser_bench
-        working-directory: sqlfluffrs
-        run: |
-          mkdir -p /tmp/bench-stats
-          cargo bench --bench parser_bench 2>&1 | tee /tmp/bench-stats/rust-parser-bench.txt
-
-      - name: Upload bench stats
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bench-stats-rust-parser-bench
-          path: /tmp/bench-stats/rust-parser-bench.txt
-          if-no-files-found: warn
-
-  # ─────────────────────────────────────────────────────────────────────────────
   # Rust tpc_bench — one matrix job per benchmark, iai-callgrind.
   #
   # The Rust source to compile comes from commit_sha.  The entire
@@ -509,7 +431,7 @@ jobs:
   bench-summary:
     name: Benchmark Summary
     runs-on: ubuntu-latest
-    needs: [python-bench, rust-parser-bench, rust-tpc-benchmarks]
+    needs: [python-bench, rust-tpc-benchmarks]
     if: always()
 
     steps:
