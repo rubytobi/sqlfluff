@@ -22,19 +22,23 @@
 #
 # Job graph:
 #
-#   fetch-tpc-fixtures   python-bench-prepare    rust-parser-bench
-#   (uploads artifact)   (builds venv, caches)   (no fixtures needed)
-#          │                    │
-#          └──────────┬─────────┘
-#                     ▼
-#          Python fan-out (80 jobs in parallel):       rust-tpc-benchmarks
-#          callgrind (instructions) × 10 queries each  (4 jobs in parallel)
-#            test_lex_tpch / test_parse_tpch            lex_tpch
-#            test_lex_tpcds / test_parse_tpcds           parse_tpch
-#          massif (peak heap) × 10 queries each         lex_tpcds
-#            test_lex_tpch-mem / test_parse_tpch-mem    parse_tpcds
-#            test_lex_tpcds-mem / test_parse_tpcds-mem
-#                     │
+#   fetch-tpc-fixtures   python-bench-prepare    rust-parser-bench   setup-bench-matrix
+#   (uploads artifact)   (builds venv, caches)   (no fixtures needed) (emits runner IDs)
+#          │                    │                                            │
+#          └──────────┬─────────┘                                           │
+#                     └─────────────────────────────────────────────────────┘
+#                                           ▼
+#       setup-bench-matrix────────────────────────────────────────┐
+#              │                                                   │
+#              ▼                                                   │
+#          python-bench (max_parallel runners,        rust-tpc-benchmarks
+#          each running a round-robin slice            (4 jobs in parallel)
+#          of all 242 combinations):                   lex_tpch
+#            runner 0: combos 0, 20, 40, …             parse_tpch
+#            runner 1: combos 1, 21, 41, …             lex_tpcds
+#            …                                         parse_tpcds
+#            runner N-1: combos N-1, 2N-1, …
+#                     │                               │
 #                     └──────────────┬────────────────┘
 #                                    ▼
 #                             bench-summary
@@ -63,6 +67,11 @@ on:
         description: 'Commit SHA to check out and benchmark'
         required: true
         type: string
+      max_parallel:
+        description: 'Maximum number of Python benchmark jobs to run concurrently (Rust jobs add ~5 more)'
+        required: false
+        type: number
+        default: 19
 
 concurrency:
   group: benchmarks-${{ inputs.commit_sha }}
@@ -171,18 +180,36 @@ jobs:
             pytest pytest-codspeed pytest-benchmark
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Python benchmarks — one job per query, all concurrent.
-  # Each job restores the venv from cache (guaranteed hit: python-bench-prepare
-  # has already populated it) and installs Valgrind from apt.
+  # Emit {"runner_id": [0, 1, ..., max_parallel-1]} so python-bench can use a
+  # dynamic matrix sized exactly to the requested parallelism.
   # ─────────────────────────────────────────────────────────────────────────────
-  python-lex-tpch:
-    name: Python – test_lex_tpch Q${{ matrix.query_idx }}
+  setup-bench-matrix:
+    name: Generate runner matrix
     runs-on: ubuntu-latest
-    needs: [fetch-tpc-fixtures, python-bench-prepare]
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Generate runner IDs
+        id: gen
+        run: |
+          matrix=$(python3 -c "import json; print(json.dumps({'runner_id': list(range(${{ inputs.max_parallel }}))}))")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Python benchmarks — max_parallel runners, each assigned a round-robin slice
+  # of all 242 (benchmark × query) combinations.  Combinations are ordered as:
+  #   lex_tpch Q0–Q21, parse_tpch Q0–Q21, lex_tpcds Q0–Q98, parse_tpcds Q0–Q98
+  # Runner r handles indices r, r+max_parallel, r+2×max_parallel, …  running
+  # them sequentially.  Every runner carries ~equal total work so all finish
+  # at roughly the same time with no straggler holding back the group.
+  # ─────────────────────────────────────────────────────────────────────────────
+  python-bench:
+    name: Python bench runner ${{ matrix.runner_id }}
+    runs-on: ubuntu-latest
+    needs: [setup-bench-matrix, fetch-tpc-fixtures, python-bench-prepare]
     strategy:
       fail-fast: false
-      matrix:
-        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+      matrix: ${{ fromJSON(needs.setup-bench-matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout workflow branch (benchmark infrastructure)
@@ -211,244 +238,57 @@ jobs:
       - name: Install Valgrind
         run: sudo apt-get update -q && sudo apt-get install -y valgrind
 
-      - name: Run benchmark under Valgrind callgrind
-        env:
-          TPCH_QUERY_IDX: ${{ matrix.query_idx }}
-        run: |
-          mkdir -p /tmp/callgrind
-          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
-          valgrind -q \
-            --tool=callgrind \
-            --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --combine-dumps=yes \
-            --dump-line=no \
-            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_lex_tpch \
-              -v --benchmark-disable -p no:codspeed
-
-      - name: Save instruction-count summary
-        if: always()
+      - name: Run assigned benchmark batch
         run: |
           mkdir -p /tmp/bench-stats
-          {
-            echo "Benchmark: test_lex_tpch Q${{ matrix.query_idx }}"
-            awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
-              /tmp/callgrind/callgrind.out
-          } | tee /tmp/bench-stats/python-test_lex_tpch-q${{ matrix.query_idx }}.txt
-          echo "──────────────────────────────────────"
+
+          # Build ordered list of all (benchmark, query_idx) combinations.
+          declare -a combos
+          for bench in test_lex_tpch test_parse_tpch test_lex_tpcds test_parse_tpcds; do
+            if [[ "$bench" == *tpcds* ]]; then max_q=98; else max_q=21; fi
+            for ((q=0; q<=max_q; q++)); do combos+=("${bench}:${q}"); done
+          done
+
+          runner_id=${{ matrix.runner_id }}
+          max_parallel=${{ inputs.max_parallel }}
+
+          for ((i=runner_id; i<${#combos[@]}; i+=max_parallel)); do
+            bench="${combos[$i]%%:*}"
+            qidx="${combos[$i]##*:}"
+
+            echo "━━━ $bench Q$qidx ━━━"
+            mkdir -p /tmp/callgrind
+            unset TPCH_QUERY_IDX TPCDS_QUERY_IDX
+            if [[ "$bench" == *tpcds* ]]; then
+              export TPCDS_QUERY_IDX=$qidx
+            else
+              export TPCH_QUERY_IDX=$qidx
+            fi
+
+            PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
+            valgrind -q \
+              --tool=callgrind \
+              --callgrind-out-file=/tmp/callgrind/callgrind.out \
+              --combine-dumps=yes \
+              --dump-line=no \
+              .bench-venv/bin/python -m pytest test/benchmarks/ \
+                -k "$bench" -v --benchmark-disable -p no:codspeed \
+              || echo "::warning::$bench Q$qidx failed, continuing"
+
+            {
+              echo "Benchmark: $bench Q$qidx"
+              awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
+                /tmp/callgrind/callgrind.out
+            } | tee "/tmp/bench-stats/python-${bench}-q${qidx}.txt"
+            echo "──────────────────────────────────────"
+          done
 
       - name: Upload bench stats
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bench-stats-python-test_lex_tpch-q${{ matrix.query_idx }}
-          path: /tmp/bench-stats/python-test_lex_tpch-q${{ matrix.query_idx }}.txt
-          if-no-files-found: warn
-
-  python-parse-tpch:
-    name: Python – test_parse_tpch Q${{ matrix.query_idx }}
-    runs-on: ubuntu-latest
-    needs: [fetch-tpc-fixtures, python-bench-prepare]
-    strategy:
-      fail-fast: false
-      matrix:
-        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-
-    steps:
-      - name: Checkout workflow branch (benchmark infrastructure)
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - name: Download TPC fixtures
-        uses: actions/download-artifact@v4
-        with:
-          name: tpc-fixtures
-          path: .cache/tpc-fixtures/
-
-      - name: Set up Python 3.14
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.14'
-
-      - name: Restore benchmark virtual environment
-        uses: actions/cache/restore@v4
-        with:
-          path: .bench-venv
-          key: bench-venv-${{ runner.os }}-py3.14-${{ inputs.commit_sha }}
-          fail-on-cache-miss: true
-
-      - name: Install Valgrind
-        run: sudo apt-get update -q && sudo apt-get install -y valgrind
-
-      - name: Run benchmark under Valgrind callgrind
-        env:
-          TPCH_QUERY_IDX: ${{ matrix.query_idx }}
-        run: |
-          mkdir -p /tmp/callgrind
-          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
-          valgrind -q \
-            --tool=callgrind \
-            --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --combine-dumps=yes \
-            --dump-line=no \
-            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_parse_tpch \
-              -v --benchmark-disable -p no:codspeed
-
-      - name: Save instruction-count summary
-        if: always()
-        run: |
-          mkdir -p /tmp/bench-stats
-          {
-            echo "Benchmark: test_parse_tpch Q${{ matrix.query_idx }}"
-            awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
-              /tmp/callgrind/callgrind.out
-          } | tee /tmp/bench-stats/python-test_parse_tpch-q${{ matrix.query_idx }}.txt
-          echo "──────────────────────────────────────"
-
-      - name: Upload bench stats
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bench-stats-python-test_parse_tpch-q${{ matrix.query_idx }}
-          path: /tmp/bench-stats/python-test_parse_tpch-q${{ matrix.query_idx }}.txt
-          if-no-files-found: warn
-
-  python-lex-tpcds:
-    name: Python – test_lex_tpcds Q${{ matrix.query_idx }}
-    runs-on: ubuntu-latest
-    needs: [fetch-tpc-fixtures, python-bench-prepare]
-    strategy:
-      fail-fast: false
-      matrix:
-        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-
-    steps:
-      - name: Checkout workflow branch (benchmark infrastructure)
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - name: Download TPC fixtures
-        uses: actions/download-artifact@v4
-        with:
-          name: tpc-fixtures
-          path: .cache/tpc-fixtures/
-
-      - name: Set up Python 3.14
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.14'
-
-      - name: Restore benchmark virtual environment
-        uses: actions/cache/restore@v4
-        with:
-          path: .bench-venv
-          key: bench-venv-${{ runner.os }}-py3.14-${{ inputs.commit_sha }}
-          fail-on-cache-miss: true
-
-      - name: Install Valgrind
-        run: sudo apt-get update -q && sudo apt-get install -y valgrind
-
-      - name: Run benchmark under Valgrind callgrind
-        env:
-          TPCDS_QUERY_IDX: ${{ matrix.query_idx }}
-        run: |
-          mkdir -p /tmp/callgrind
-          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
-          valgrind -q \
-            --tool=callgrind \
-            --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --combine-dumps=yes \
-            --dump-line=no \
-            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_lex_tpcds \
-              -v --benchmark-disable -p no:codspeed
-
-      - name: Save instruction-count summary
-        if: always()
-        run: |
-          mkdir -p /tmp/bench-stats
-          {
-            echo "Benchmark: test_lex_tpcds Q${{ matrix.query_idx }}"
-            awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
-              /tmp/callgrind/callgrind.out
-          } | tee /tmp/bench-stats/python-test_lex_tpcds-q${{ matrix.query_idx }}.txt
-          echo "──────────────────────────────────────"
-
-      - name: Upload bench stats
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bench-stats-python-test_lex_tpcds-q${{ matrix.query_idx }}
-          path: /tmp/bench-stats/python-test_lex_tpcds-q${{ matrix.query_idx }}.txt
-          if-no-files-found: warn
-
-  python-parse-tpcds:
-    name: Python – test_parse_tpcds Q${{ matrix.query_idx }}
-    runs-on: ubuntu-latest
-    needs: [fetch-tpc-fixtures, python-bench-prepare]
-    strategy:
-      fail-fast: false
-      matrix:
-        query_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-
-    steps:
-      - name: Checkout workflow branch (benchmark infrastructure)
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - name: Download TPC fixtures
-        uses: actions/download-artifact@v4
-        with:
-          name: tpc-fixtures
-          path: .cache/tpc-fixtures/
-
-      - name: Set up Python 3.14
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.14'
-
-      - name: Restore benchmark virtual environment
-        uses: actions/cache/restore@v4
-        with:
-          path: .bench-venv
-          key: bench-venv-${{ runner.os }}-py3.14-${{ inputs.commit_sha }}
-          fail-on-cache-miss: true
-
-      - name: Install Valgrind
-        run: sudo apt-get update -q && sudo apt-get install -y valgrind
-
-      - name: Run benchmark under Valgrind callgrind
-        env:
-          TPCDS_QUERY_IDX: ${{ matrix.query_idx }}
-        run: |
-          mkdir -p /tmp/callgrind
-          PYTHONHASHSEED=0 PYTHONMALLOC=malloc \
-          valgrind -q \
-            --tool=callgrind \
-            --callgrind-out-file=/tmp/callgrind/callgrind.out \
-            --combine-dumps=yes \
-            --dump-line=no \
-            .bench-venv/bin/python -m pytest test/benchmarks/ -k test_parse_tpcds \
-              -v --benchmark-disable -p no:codspeed
-
-      - name: Save instruction-count summary
-        if: always()
-        run: |
-          mkdir -p /tmp/bench-stats
-          {
-            echo "Benchmark: test_parse_tpcds Q${{ matrix.query_idx }}"
-            awk '/^summary:/ { printf "Instructions: %'"'"'d\n", $2 }' \
-              /tmp/callgrind/callgrind.out
-          } | tee /tmp/bench-stats/python-test_parse_tpcds-q${{ matrix.query_idx }}.txt
-          echo "──────────────────────────────────────"
-
-      - name: Upload bench stats
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bench-stats-python-test_parse_tpcds-q${{ matrix.query_idx }}
-          path: /tmp/bench-stats/python-test_parse_tpcds-q${{ matrix.query_idx }}.txt
+          name: bench-stats-python-runner-${{ matrix.runner_id }}
+          path: /tmp/bench-stats/
           if-no-files-found: warn
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -752,6 +592,13 @@ jobs:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 1
 
+      - name: Overlay benchmark infrastructure from workflow branch
+        run: |
+          git fetch origin ${{ github.ref_name }} --depth=1
+          git checkout FETCH_HEAD -- \
+            sqlfluffrs/Cargo.toml \
+            sqlfluffrs/benches/parser_bench.rs
+
       - name: Set up Python 3.14
         uses: actions/setup-python@v6
         with:
@@ -783,22 +630,14 @@ jobs:
       - name: Install Valgrind
         run: sudo apt-get update -q && sudo apt-get install -y valgrind
 
-      - name: Detect iai-callgrind version
-        id: iai
+      - name: Install iai-callgrind-runner
         working-directory: sqlfluffrs
         run: |
           version=$(cargo metadata --format-version 1 \
-            | python3 -c "import sys,json; m=json.load(sys.stdin); \
-              print(next((p['version'] for p in m['packages'] if p['name']=='iai-callgrind'), ''))")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Install iai-callgrind-runner
-        if: steps.iai.outputs.version != ''
-        working-directory: sqlfluffrs
-        run: cargo install iai-callgrind-runner --version "${{ steps.iai.outputs.version }}"
+            | python3 -c "import sys,json; m=json.load(sys.stdin); print(next(p['version'] for p in m['packages'] if p['name']=='iai-callgrind'))")
+          cargo install iai-callgrind-runner --version "$version"
 
       - name: Run parser_bench
-        if: steps.iai.outputs.version != ''
         working-directory: sqlfluffrs
         run: |
           mkdir -p /tmp/bench-stats
@@ -921,7 +760,7 @@ jobs:
   bench-summary:
     name: Benchmark Summary
     runs-on: ubuntu-latest
-    needs: [python-lex-tpch, python-parse-tpch, python-lex-tpcds, python-parse-tpcds, python-lex-tpch-mem, python-parse-tpch-mem, python-lex-tpcds-mem, python-parse-tpcds-mem, rust-parser-bench, rust-tpc-benchmarks]
+    needs: [python-bench, rust-parser-bench, rust-tpc-benchmarks]
     if: always()
 
     steps:
