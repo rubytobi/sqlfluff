@@ -521,9 +521,44 @@ jobs:
           path: bench-stats/
 
       - name: Print summary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           shopt -s nullglob
           benchmarks=(test_lex_tpch test_parse_tpch test_lex_tpcds test_parse_tpcds)
+
+          # ── Fetch commit metadata ─────────────────────────────────────
+          commit_json=$(curl -sf \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ inputs.commit_sha }}" \
+            || echo '{}')
+          commit_sha=$(printf '%s' "$commit_json" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('sha','${{ inputs.commit_sha }}'))")
+          commit_ts=$(printf '%s' "$commit_json" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('commit',{}).get('author',{}).get('date','—'))")
+          commit_subject=$(printf '%s' "$commit_json" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('commit',{}).get('message','—') or '—').splitlines()[0])")
+
+          # ── Markdown commit header → GitHub Step Summary ──────────────
+          {
+            echo "## Benchmark run"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Commit** | \`${commit_sha}\` |"
+            echo "| **Timestamp** | ${commit_ts} |"
+            echo "| **Subject** | ${commit_subject} |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # ── Plain-text commit header → log ────────────────────────────
+          echo "═══════════════════════════════════════════════════════════════"
+          printf "Commit:    %s\n" "$commit_sha"
+          printf "Timestamp: %s\n" "$commit_ts"
+          printf "Subject:   %s\n" "$commit_subject"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo ""
 
           # Parse Python stat files into associative array keyed by "bench|query"
           declare -A data
