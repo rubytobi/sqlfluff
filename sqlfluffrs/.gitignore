@@ -1,5 +1,10 @@
 /target
 
+# maturin develop drops compiled binaries here; ignore them but track __init__.py
+/sqlfluffrs/*.pyd
+/sqlfluffrs/*.pdb
+/sqlfluffrs/*.so
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 .pytest_cache/
