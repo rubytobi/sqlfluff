@@ -12,16 +12,17 @@
 //! ## Milestone 1 scope (read-only navigation)
 //!
 //! This module currently implements ingest-from-[`Node`] plus the read-only
-//! navigation/accessor surface that the Python rule API depends on.  uuids are
-//! minted at ingest time (sufficient for read-only linting); threading a stable
-//! uuid through `apply_as_root` is deferred to the fixing milestone where
-//! cross-reingest identity matters for `LintFix` anchoring.
+//! navigation/accessor surface that the Python rule API depends on.  Node uuids
+//! are sequential arena indices (NodeId cast to u128), which is sufficient for
+//! read-only linting.  Threading a stable cross-reingest uuid through
+//! `apply_as_root` is deferred to the fixing milestone where `LintFix` anchoring
+//! requires persistent identity.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
 use sqlfluffrs_types::PositionMarker;
 
 use super::types::{MetaType, Node, RawSegmentKwargs};
@@ -86,7 +87,6 @@ struct ArenaNode {
 pub(crate) struct Arena {
     nodes: Vec<ArenaNode>,
     root: NodeId,
-    by_uuid: HashMap<u128, NodeId>,
 }
 
 /// A single step on a path between two nodes — mirrors Python's `PathStep`
@@ -107,16 +107,10 @@ impl Arena {
         let mut arena = Arena {
             nodes: Vec::new(),
             root: NodeId(0),
-            by_uuid: HashMap::new(),
         };
         let root = arena.ingest(node, None, 0);
         arena.root = root;
         arena
-    }
-
-    fn next_uuid(&self) -> u128 {
-        // Random v4 uuid, mirroring Python's `uuid4().int` identity semantics.
-        uuid::Uuid::new_v4().as_u128()
     }
 
     fn alloc(
@@ -127,7 +121,9 @@ impl Arena {
         parent_idx: usize,
     ) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
-        let uuid = self.next_uuid();
+        // uuid == NodeId index as u128: unique within the arena, O(1) to invert,
+        // no RNG needed for read-only milestone-1 linting.
+        let uuid = id.0 as u128;
         self.nodes.push(ArenaNode {
             uuid,
             parent,
@@ -138,7 +134,6 @@ impl Arena {
             cached_raw: RefCell::new(None),
             descendant_types: RefCell::new(None),
         });
-        self.by_uuid.insert(uuid, id);
         id
     }
 
@@ -252,7 +247,8 @@ impl Arena {
     }
 
     pub(crate) fn node_by_uuid(&self, uuid: u128) -> Option<NodeId> {
-        self.by_uuid.get(&uuid).copied()
+        let id = NodeId(uuid as u32);
+        if id.idx() < self.nodes.len() { Some(id) } else { None }
     }
 
     #[inline]

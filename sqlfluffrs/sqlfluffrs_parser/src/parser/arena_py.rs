@@ -108,8 +108,9 @@ impl PyHandle {
     }
 
     fn __eq__(&self, other: &PyHandle) -> bool {
-        // Same arena + same uuid.  (Handles into different arenas are never
-        // equal even if uuids collided, which they don't in practice.)
+        // Same arena + same uuid.  Arena uuids are sequential (0, 1, 2...),
+        // so two arenas always share uuid values; Arc::ptr_eq is the only
+        // guard against cross-arena handle equality and must not be removed.
         // Lock once: `Mutex` is not re-entrant, so comparing two handles into
         // the same arena must not take the lock twice.
         if !Arc::ptr_eq(&self.inner, &other.inner) {

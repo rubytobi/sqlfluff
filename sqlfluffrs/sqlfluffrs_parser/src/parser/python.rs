@@ -2,6 +2,8 @@ use hashbrown::HashMap;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use std::sync::Arc;
+use std::str::FromStr;
 
 use crate::parser::MetaSegment;
 
@@ -11,7 +13,6 @@ use super::{Node, ParseError, Parser};
 use sqlfluffrs_dialects::Dialect;
 use sqlfluffrs_python::token::PyToken;
 use sqlfluffrs_types::Token;
-use std::str::FromStr;
 
 // Create a custom Python exception for parse errors with position info
 pyo3::create_exception!(
@@ -257,7 +258,7 @@ impl From<Node> for PyNode {
 /// frozen=true makes this immutable (matches Python's @dataclass(frozen=True))
 #[pyclass(name = "RsMatchResult", module = "sqlfluffrs", frozen, from_py_object)]
 #[derive(Clone)]
-pub struct PyMatchResult(pub MatchResult);
+pub struct PyMatchResult(pub Arc<MatchResult>);
 
 #[pymethods]
 impl PyMatchResult {
@@ -282,7 +283,7 @@ impl PyMatchResult {
         self.0
             .child_matches
             .iter()
-            .map(|m| PyMatchResult((**m).clone()))
+            .map(|m| PyMatchResult(Arc::clone(m)))
             .collect()
     }
 
@@ -437,10 +438,12 @@ impl PyMatchResult {
         let rust_leading: Vec<Token> = leading.into_iter().map(|t| t.into()).collect();
         let rust_tokens: Vec<Token> = tokens.into_iter().map(|t| t.into()).collect();
         let rust_trailing: Vec<Token> = trailing.into_iter().map(|t| t.into()).collect();
-        let node = self
-            .0
-            .clone()
-            .apply_as_root(&rust_tokens, &rust_leading, &rust_trailing);
+        let node = MatchResult::apply_as_root_arc(
+            Arc::clone(&self.0),
+            &rust_tokens,
+            &rust_leading,
+            &rust_trailing,
+        );
         super::arena_py::PyTree::new(super::arena::Arena::from_node(&node))
     }
 }
@@ -529,7 +532,7 @@ impl PyParser {
         // Parse and get the MatchResult directly
         let match_result = parser.call_rule_as_root().map_err(parse_error_to_pyerr)?;
 
-        Ok(PyMatchResult(match_result))
+        Ok(PyMatchResult(Arc::new(match_result)))
     }
 
     /// Parse SQL from tokens and return MatchResult along with parser statistics.
@@ -583,7 +586,7 @@ impl PyParser {
         // Diagnostic counters are owned by the parser; pull them as a unit.
         stats.extend(parser.diagnostics());
 
-        Ok((PyMatchResult(match_result), stats))
+        Ok((PyMatchResult(Arc::new(match_result)), stats))
     }
 
     /// Parse SQL from tokens and return grammar call counts for debugging.
@@ -635,7 +638,7 @@ impl PyParser {
             *grammar_counts.entry(grammar_name).or_insert(0) += 1;
         }
 
-        Ok((PyMatchResult(match_result), grammar_counts))
+        Ok((PyMatchResult(Arc::new(match_result)), grammar_counts))
     }
 }
 

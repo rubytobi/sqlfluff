@@ -2233,7 +2233,6 @@ dependencies = [
  "sqlfluffrs_lexer",
  "sqlfluffrs_python",
  "sqlfluffrs_types",
- "uuid",
 ]
 
 [[package]]

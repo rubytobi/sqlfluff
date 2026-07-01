@@ -665,11 +665,23 @@ impl MatchResult {
     /// * `trailing` — non-code tokens after the last code token (e.g.
     ///   trailing newline + end_of_file).  Pass `&[]` when there are none.
     pub fn apply_as_root(self, tokens: &[Token], leading: &[Token], trailing: &[Token]) -> Node {
+        Self::apply_as_root_arc(Arc::new(self), tokens, leading, trailing)
+    }
+
+    /// Same as [`apply_as_root`][MatchResult::apply_as_root] but accepts an `Arc<MatchResult>` so the
+    /// Python-facing call site can pass the already-`Arc`-wrapped inner value
+    /// without cloning the whole tree first.
+    pub(crate) fn apply_as_root_arc(
+        self_arc: Arc<Self>,
+        tokens: &[Token],
+        leading: &[Token],
+        trailing: &[Token],
+    ) -> Node {
         let file_mr = MatchResult {
             matched_slice: 0..tokens.len(),
             matched_class: Some(MatchedClass::root()),
             insert_segments: vec![],
-            child_matches: vec![Arc::new(self)],
+            child_matches: vec![self_arc],
         };
         let root_nodes = file_mr.apply(tokens);
         if root_nodes.len() > 1 {
