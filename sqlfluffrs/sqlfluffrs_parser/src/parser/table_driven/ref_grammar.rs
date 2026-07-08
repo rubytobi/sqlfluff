@@ -129,7 +129,7 @@ impl Parser<'_> {
         );
 
         // Store context with collected leading transparent tokens
-        frame.context = FrameContext::Ref(RefState {
+        frame.context = FrameContext::Ref(Box::new(RefState {
             grammar_id,
             name: rule_name,
             segment_class_name: table_segment_class,
@@ -138,7 +138,7 @@ impl Parser<'_> {
             last_child_frame_id: Some(stack.frame_id_counter),
             child_grammar_id,
             match_result: None,
-        });
+        }));
 
         // CRITICAL: Set parent frame state to WaitingForChild so it will
         // retrieve the child result on the next iteration

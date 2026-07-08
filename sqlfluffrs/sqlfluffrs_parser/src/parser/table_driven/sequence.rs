@@ -108,7 +108,7 @@ impl Parser<'_> {
         let frame_pos = frame.pos;
 
         // Update frame with Sequence context
-        frame.context = FrameContext::Sequence(SequenceState {
+        frame.context = FrameContext::Sequence(Box::new(SequenceState {
             seq_grammar_id,
             start_idx: frame.pos,
             matched_idx: frame.pos,
@@ -121,7 +121,7 @@ impl Parser<'_> {
             insert_segments: Vec::new(), // (position, segments) to insert
             child_matches: Vec::new(),   // Store child matches here until sequence is complete
             child_terminators,           // Parent terminators (without Sequence's own) for children
-        });
+        }));
         frame.table_terminators = all_terminators;
 
         // Buffer any leading meta elements before creating first child

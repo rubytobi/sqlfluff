@@ -131,7 +131,10 @@ impl Parser<'_> {
             .filter(|(idx, _id)| *idx != start_bracket_idx && *idx != end_bracket_idx)
             .map(|(_, id)| id)
             .collect::<Vec<_>>();
-        let FrameContext::Bracketed(BracketedState {
+        let FrameContext::Bracketed(bracketed_state) = &mut frame.context else {
+            unreachable!("Expected Bracketed context");
+        };
+        let BracketedState {
             phase: bracket_state,
             bracket_max_idx,
             last_child_frame_id,
@@ -140,10 +143,7 @@ impl Parser<'_> {
             parse_mode_override,
             child_matches,
             ..
-        }) = &mut frame.context
-        else {
-            unreachable!("Expected Bracketed context");
-        };
+        } = &mut **bracketed_state;
         if child_is_empty {
             self.pos = frame.pos;
             vdebug!("Bracketed[table] returning Empty (no opening bracket)",);
@@ -299,7 +299,10 @@ impl Parser<'_> {
         // Work with MatchResult directly (Python parity)
         let child_is_empty = child_match.is_empty();
         let all_children: Vec<GrammarId> = self.grammar_ctx.children(frame.grammar_id).collect();
-        let FrameContext::Bracketed(BracketedState {
+        let FrameContext::Bracketed(bracketed_state) = &mut frame.context else {
+            unreachable!("Expected Bracketed context");
+        };
+        let BracketedState {
             grammar_id,
             phase: bracket_state,
             bracket_max_idx,
@@ -309,10 +312,7 @@ impl Parser<'_> {
             parse_mode_override,
             child_matches,
             ..
-        }) = &mut frame.context
-        else {
-            unreachable!("Expected Bracketed context");
-        };
+        } = &mut **bracketed_state;
         // Python reference: sequence.py Bracketed.match() lines ~530-570
         // In Python, Bracketed doesn't pre-compute the closing bracket position.
         // Instead, it lets Sequence.match() handle the content (which may return
@@ -513,14 +513,14 @@ impl Parser<'_> {
     ) -> Result<TableFrameResult, ParseError> {
         // Work with MatchResult directly (Python parity)
         let child_is_empty = child_match.is_empty();
-        let FrameContext::Bracketed(BracketedState {
+        let FrameContext::Bracketed(bracketed_state) = &mut frame.context else {
+            unreachable!("Expected Bracketed context");
+        };
+        let BracketedState {
             phase: bracket_state,
             child_matches,
             ..
-        }) = &mut frame.context
-        else {
-            unreachable!("Expected Bracketed context");
-        };
+        } = &mut **bracketed_state;
         vdebug!(
             "DEBUG: Bracketed[table] MatchingClose - child_is_empty={}, child_end_pos={}",
             child_is_empty,
@@ -655,7 +655,7 @@ fn initialize_bracketed_frame(
 ) {
     // Update frame with Bracketed context
     frame.state = FrameState::WaitingForChild { child_index: 0 };
-    frame.context = FrameContext::Bracketed(BracketedState {
+    frame.context = FrameContext::Bracketed(Box::new(BracketedState {
         grammar_id,
         phase: BracketedPhase::MatchingOpen,
         last_child_frame_id: None,
@@ -664,7 +664,7 @@ fn initialize_bracketed_frame(
         content_idx: 0,
         parse_mode_override: None, // Will be set when creating content frames
         child_matches: Vec::new(),
-    });
+    }));
     frame.table_terminators = SmallVec::from_slice(all_terminators);
     stack.push(frame);
 }

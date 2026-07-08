@@ -157,7 +157,7 @@ impl Parser<'_> {
         );
 
         // Store context for the element/delimiter phase loop.
-        frame.context = FrameContext::Delimited(DelimitedState {
+        frame.context = FrameContext::Delimited(Box::new(DelimitedState {
             grammar_id,
             delimiter_count: 0,
             matched_idx: start_pos,
@@ -169,7 +169,7 @@ impl Parser<'_> {
             pos_before_delimiter: None,
             child_terminators, // Move, no clone
             working_match: Arc::new(MatchResult::empty_at(start_pos)),
-        });
+        }));
 
         // Push child to match element(s).
         Ok(stack.push_child_and_wait(frame, child_frame, 0))
@@ -222,7 +222,10 @@ impl Parser<'_> {
         let cfg = self.delimited_frame_config(frame.grammar_id);
         let (allow_gaps, allow_trailing) = (cfg.allow_gaps, cfg.allow_trailing);
         let (min_delimiters, delimiter_id) = (cfg.min_delimiters, cfg.delimiter_id);
-        let FrameContext::Delimited(DelimitedState {
+        let FrameContext::Delimited(delimited_state) = &mut frame.context else {
+            unreachable!("Expected Delimited context");
+        };
+        let DelimitedState {
             delimiter_count,
             matched_idx,
             working_idx,
@@ -232,10 +235,7 @@ impl Parser<'_> {
             pos_before_delimiter,
             working_match,
             ..
-        }) = &mut frame.context
-        else {
-            unreachable!("Expected Delimited context");
-        };
+        } = &mut **delimited_state;
         // If allow_gaps, skip non-code tokens before processing
         *working_idx = self.skip_to_code_if_gaps(*working_idx, *max_idx, allow_gaps);
         self.pos = *working_idx;
@@ -417,7 +417,10 @@ impl Parser<'_> {
         let (allow_gaps, allow_trailing) = (cfg.allow_gaps, cfg.allow_trailing);
         let (min_delimiters, optional_delimiter) = (cfg.min_delimiters, cfg.optional_delimiter);
         let (elements_id, delimiter_id) = (cfg.elements_id, cfg.delimiter_id);
-        let FrameContext::Delimited(DelimitedState {
+        let FrameContext::Delimited(delimited_state) = &mut frame.context else {
+            unreachable!("Expected Delimited context");
+        };
+        let DelimitedState {
             delimiter_count,
             matched_idx,
             working_idx,
@@ -428,10 +431,7 @@ impl Parser<'_> {
             child_terminators,
             working_match,
             ..
-        }) = &mut frame.context
-        else {
-            unreachable!("Expected Delimited context");
-        };
+        } = &mut **delimited_state;
         // Clone so the borrow of `frame.context` can end before `frame` is
         // moved into the push helpers; also preserves the terminators for
         // subsequent WaitingForChild iterations.
@@ -657,17 +657,17 @@ impl Parser<'_> {
         frame: TableParseFrame,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
-        let FrameContext::Delimited(DelimitedState {
-            grammar_id,
-            delimiter_count,
-            working_match,
-            ..
-        }) = &frame.context
-        else {
+        let FrameContext::Delimited(delimited_state) = &frame.context else {
             return Err(ParseError::new(
                 "Expected Delimited context in combining".to_string(),
             ));
         };
+        let DelimitedState {
+            grammar_id,
+            delimiter_count,
+            working_match,
+            ..
+        } = &**delimited_state;
 
         vdebug!(
             "Delimited[table] Combining: frame_id={}, accumulated={}, delim_count={}",

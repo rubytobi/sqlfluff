@@ -146,7 +146,7 @@ impl Parser<'_> {
         );
 
         // Store context for WaitingForChild state (move pruned_children, no clone)
-        frame.context = FrameContext::OneOf(OneOfState {
+        frame.context = FrameContext::OneOf(Box::new(OneOfState {
             grammar_id,
             pruned_children,
             post_skip_pos,
@@ -155,7 +155,7 @@ impl Parser<'_> {
             max_idx,
             last_child_frame_id: Some(stack.frame_id_counter),
             current_child_id: Some(first_child),
-        });
+        }));
 
         // Move terminators into frame (no clone)
         frame.table_terminators = all_terminators;
@@ -188,7 +188,10 @@ impl Parser<'_> {
         child_end_pos: &usize,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
-        let FrameContext::OneOf(OneOfState {
+        let FrameContext::OneOf(oneof_state) = &mut frame.context else {
+            unreachable!("Expected OneOf context");
+        };
+        let OneOfState {
             pruned_children,
             post_skip_pos,
             longest_match,
@@ -196,10 +199,7 @@ impl Parser<'_> {
             max_idx,
             current_child_id,
             ..
-        }) = &mut frame.context
-        else {
-            unreachable!("Expected OneOf context");
-        };
+        } = &mut **oneof_state;
 
         let consumed = *child_end_pos - *post_skip_pos;
         let current_child = current_child_id.expect("current_child_id should be set");

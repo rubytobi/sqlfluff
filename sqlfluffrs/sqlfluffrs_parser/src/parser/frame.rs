@@ -65,15 +65,25 @@ pub enum FrameState {
 ///
 /// Field-name conventions follow the position-index glossary in the module
 /// docs (`start_idx` / `matched_idx` / `working_idx` / `max_idx`).
+// Each payload-carrying variant is boxed: TableParseFrame carries one FrameContext
+// per stack entry, and is itself moved (Vec push/pop, handler function params/returns)
+// on every state transition of the iterative parser. Before boxing, FrameContext's
+// size was dominated by its largest variant (AnyNumberOfState, ~176 bytes), so every
+// move copied that much regardless of which variant was actually active. Boxing
+// shrinks FrameContext to a pointer-sized enum, cutting TableParseFrame from 312 to
+// ~152 bytes and the bytes moved by frame push/pop roughly in half (measured: 6.8GB
+// moved for one 142K-token parse, correlated 1:1 with the __memcpy_avx_unaligned_erms
+// hotspot in CodSpeed profiling). The extra heap alloc/dealloc per frame is far
+// cheaper than the stack-copy volume it replaces.
 #[derive(Debug, Clone)]
 pub enum FrameContext {
     None,
-    OneOf(OneOfState),
-    Sequence(SequenceState),
-    Ref(RefState),
-    Delimited(DelimitedState),
-    Bracketed(BracketedState),
-    AnyNumberOf(AnyNumberOfState),
+    OneOf(Box<OneOfState>),
+    Sequence(Box<SequenceState>),
+    Ref(Box<RefState>),
+    Delimited(Box<DelimitedState>),
+    Bracketed(Box<BracketedState>),
+    AnyNumberOf(Box<AnyNumberOfState>),
 }
 
 /// Working state for an `AnyNumberOf` frame (see [`FrameContext::AnyNumberOf`]).

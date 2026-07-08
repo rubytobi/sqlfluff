@@ -172,7 +172,7 @@ impl Parser<'_> {
         frame.state = FrameState::WaitingForChild { child_index: 0 };
 
         // Store context with max_times config and pruned element list
-        frame.context = FrameContext::AnyNumberOf(AnyNumberOfState {
+        frame.context = FrameContext::AnyNumberOf(Box::new(AnyNumberOfState {
             grammar_id,
             pruned_children,
             count: 0,
@@ -184,7 +184,7 @@ impl Parser<'_> {
             matched: Arc::new(MatchResult::empty_at(start_pos)),
             longest_match: (Arc::new(MatchResult::empty_at(start_pos)), None),
             tried_elements: 0,
-        });
+        }));
 
         // Move terminators into frame (no clone)
         frame.table_terminators = all_terminators;
@@ -492,18 +492,18 @@ impl Parser<'_> {
         mut frame: TableParseFrame,
         stack: &mut TableParseFrameStack,
     ) -> Result<TableFrameResult, ParseError> {
-        let FrameContext::AnyNumberOf(AnyNumberOfState {
+        let FrameContext::AnyNumberOf(anynumberof_state) = &frame.context else {
+            return Err(ParseError::new(
+                "Expected AnyNumberOf context in combining".to_string(),
+            ));
+        };
+        let AnyNumberOfState {
             grammar_id,
             count,
             matched_idx,
             matched,
             ..
-        }) = &frame.context
-        else {
-            return Err(ParseError::new(
-                "Expected AnyNumberOf context in combining".to_string(),
-            ));
-        };
+        } = &**anynumberof_state;
 
         let inst = self.grammar_ctx.inst(*grammar_id);
 
