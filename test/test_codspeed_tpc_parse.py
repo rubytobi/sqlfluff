@@ -1,8 +1,15 @@
 """CodSpeed benchmark: parse the TPC-H/TPC-DS query suites via the Rust parser.
 
-Two benchmarks are exposed to pytest-codspeed: `test_parse_tpch` and
-`test_parse_tpcds`, each parsing the full query suite once per benchmark
-iteration through `Linter.parse_string` with `use_rust_parser` enabled.
+Four benchmarks are exposed to pytest-codspeed. `test_parse_tpch` and
+`test_parse_tpcds` each parse the full query suite once per benchmark
+iteration through `Linter.parse_string` with `use_rust_parser` enabled —
+the full pipeline including Python-side BaseSegment tree building.
+
+`test_native_ast_tpch` and `test_native_ast_tpcds` measure only the native
+Rust pipeline on pre-lexed tokens: `RsParser.parse_match_result_from_tokens`
+plus `RsMatchResult.apply_as_tree` (Node tree + arena construction), with no
+Python-side tree building. They are the pytest counterparts of the
+`native_ast_*` criterion benchmarks in `sqlfluffrs_benchmarks`.
 
 Run instrumented (as CI does):
     pytest test/test_codspeed_tpc_parse.py --codspeed
@@ -104,6 +111,47 @@ def rust_linter() -> Linter:
     return Linter(config=cfg)
 
 
+def _lex_token_sets(queries: list[str]) -> list[tuple[list, list, list]]:
+    """Lex each query and split its tokens into (code, leading, trailing).
+
+    Mirrors the trimming in `RustParser.parse`: the Rust parser is handed only
+    the code portion of the token stream, while leading/trailing non-code
+    tokens (e.g. an opening comment block, the trailing newline + end_of_file)
+    are passed separately to `apply_as_tree` for gap-fill into the root node.
+    """
+    sqlfluffrs = pytest.importorskip("sqlfluffrs")
+    lexer = sqlfluffrs.RsLexer(dialect="ansi")
+    token_sets = []
+    for sql in queries:
+        tokens, _ = lexer._lex(sql)
+        start = next((i for i, t in enumerate(tokens) if t.is_code), len(tokens))
+        end = next(
+            (i + 1 for i in range(len(tokens) - 1, -1, -1) if tokens[i].is_code),
+            start,
+        )
+        token_sets.append((tokens[start:end], tokens[:start], tokens[end:]))
+    return token_sets
+
+
+@pytest.fixture(scope="session")
+def rs_parser():
+    """Return a bare RsParser (ANSI), skipping if sqlfluffrs is unavailable."""
+    sqlfluffrs = pytest.importorskip("sqlfluffrs")
+    return sqlfluffrs.RsParser(dialect="ansi")
+
+
+@pytest.fixture(scope="session")
+def tpch_token_sets(tpch_queries: list[str]) -> list[tuple[list, list, list]]:
+    """Pre-lexed (code, leading, trailing) token sets for TPC-H."""
+    return _lex_token_sets(tpch_queries)
+
+
+@pytest.fixture(scope="session")
+def tpcds_token_sets(tpcds_queries: list[str]) -> list[tuple[list, list, list]]:
+    """Pre-lexed (code, leading, trailing) token sets for TPC-DS."""
+    return _lex_token_sets(tpcds_queries)
+
+
 @pytest.fixture(scope="session")
 def tpch_queries() -> list[str]:
     """Return the cached TPC-H query fixtures, fetching them if needed."""
@@ -136,3 +184,23 @@ def test_parse_tpcds(benchmark, rust_linter: Linter, tpcds_queries: list[str]) -
     def _run() -> None:
         for sql in tpcds_queries:
             rust_linter.parse_string(sql)
+
+
+def test_native_ast_tpch(benchmark, rs_parser, tpch_token_sets) -> None:
+    """Benchmark the native Rust parse + AST build on the TPC-H query set."""
+
+    @benchmark
+    def _run() -> None:
+        for code, leading, trailing in tpch_token_sets:
+            rs_match = rs_parser.parse_match_result_from_tokens(code)
+            rs_match.apply_as_tree(code, leading=leading, trailing=trailing)
+
+
+def test_native_ast_tpcds(benchmark, rs_parser, tpcds_token_sets) -> None:
+    """Benchmark the native Rust parse + AST build on the TPC-DS query set."""
+
+    @benchmark
+    def _run() -> None:
+        for code, leading, trailing in tpcds_token_sets:
+            rs_match = rs_parser.parse_match_result_from_tokens(code)
+            rs_match.apply_as_tree(code, leading=leading, trailing=trailing)
