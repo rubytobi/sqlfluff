@@ -304,7 +304,7 @@ pub struct TableParseFrame {
     /// When Some, this frame uses table-driven parsing
     /// Table-driven terminators (parallel to terminators field)
     /// SmallVec avoids heap allocation for common case of 0-4 terminators
-    pub table_terminators: SmallVec<[GrammarId; 4]>,
+    pub table_terminators: SmallVec<[GrammarId; 12]>,
     /// Current state of this frame
     pub state: FrameState,
     /// Additional context depending on grammar type
