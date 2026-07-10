@@ -811,8 +811,13 @@ class BaseSegment(metaclass=SegmentMetaclass):
 
     def set_as_parent(self, recurse: bool = True) -> None:
         """Set this segment as parent for child all segments."""
+        # NOTE: One weakref for all children (CPython caches and reuses the
+        # callback-less weakref per referent, but the constructor call per
+        # child still costs). This runs on every segment construction.
+        ref = weakref.ref(self)
         for idx, seg in enumerate(self.segments):
-            seg.set_parent(self, idx)
+            seg._parent = ref
+            seg._parent_idx = idx
             # Recurse if not disabled
             if recurse:
                 seg.set_as_parent(recurse=recurse)

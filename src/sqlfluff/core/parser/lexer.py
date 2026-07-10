@@ -9,6 +9,7 @@ import regex
 
 from sqlfluff.core.config import FluffConfig
 from sqlfluff.core.errors import SQLLexError
+from sqlfluff.core.helpers.identity import get_next_id
 from sqlfluff.core.helpers.slice import is_zero_slice, offset_slice, to_tuple
 from sqlfluff.core.parser.markers import PositionMarker
 from sqlfluff.core.parser.segments import (
@@ -914,16 +915,19 @@ try:
     # Dynamically generate the segment_types map
     segment_types = get_segment_type_map(RawSegment)
 
-    # Subset of segment_types whose `from_rstoken` is the plain RawSegment
-    # implementation. For these, `lex()` can construct the segment directly
-    # from the batched per-token data returned by `_lex_segment_data` (a
-    # single boundary crossing) instead of calling ~10 PyO3 getters per
-    # token. Classes with a custom `from_rstoken` (e.g. MetaSegment,
-    # TemplateSegment) always take the per-token path.
+    # Subset of segment_types whose `from_rstoken` AND `__init__` are the
+    # plain RawSegment implementations. For these, `lex()` can construct the
+    # segment directly from the batched per-token data returned by
+    # `_lex_segment_data` (a single boundary crossing) instead of calling
+    # ~10 PyO3 getters per token - and can populate the instance dict
+    # directly rather than going through `__init__`. Classes with a custom
+    # `from_rstoken` or `__init__` (e.g. MetaSegment, TemplateSegment)
+    # always take the per-token path.
     _fast_segment_types = {
         seg_type: seg_cls
         for seg_type, seg_cls in segment_types.items()
         if seg_cls.from_rstoken.__func__ is RawSegment.from_rstoken.__func__
+        and seg_cls.__init__ is RawSegment.__init__
     }
 
     class PyRsLexer(RsLexer):
@@ -994,33 +998,44 @@ try:
                     escape_replacements,
                     source_fixes,
                 ) = data
-                segment = cls(
-                    raw=raw_str,
-                    # Passing the working position up front skips the newline
-                    # bisect in PositionMarker.__post_init__; the values are
-                    # computed identically (from the templated start offset)
-                    # on the Rust side. The explicit step of 1 matches the
-                    # slice objects the RsPositionMarker getters produce, so
-                    # markers from this path compare equal to ones built via
-                    # from_rstoken.
-                    pos_marker=PositionMarker(
-                        slice(src_start, src_stop, 1),
-                        slice(tmpl_start, tmpl_stop, 1),
-                        py_template,
-                        line_no,
-                        line_pos,
-                    ),
-                    instance_types=instance_types,
-                    trim_start=trim_start,
-                    trim_chars=trim_chars,
-                    source_fixes=source_fixes,
-                    uuid=uuid,
-                    quoted_value=quoted_value,
-                    escape_replacements=escape_replacements,
+                # Direct construction, mirroring RawSegment.__init__ (which
+                # `cls` is verified to use - see _fast_segment_types) field
+                # for field. This runs once per token, so skipping the
+                # constructor's argument juggling is a measurable win.
+                segment = cls.__new__(cls)
+                d = segment.__dict__
+                # Passing the working position up front skips the newline
+                # bisect in PositionMarker.__init__; the values are computed
+                # identically (from the templated start offset) on the Rust
+                # side. The explicit step of 1 matches the slice objects the
+                # RsPositionMarker getters produce, so markers from this path
+                # compare equal to ones built via from_rstoken.
+                d["pos_marker"] = PositionMarker(
+                    slice(src_start, src_stop, 1),
+                    slice(tmpl_start, tmpl_stop, 1),
+                    py_template,
+                    line_no,
+                    line_pos,
+                )
+                d["_raw"] = raw_str
+                d["_raw_upper"] = raw_str.upper()
+                d["segments"] = ()
+                d["instance_types"] = instance_types
+                d["trim_start"] = trim_start
+                d["trim_chars"] = trim_chars
+                d["_source_fixes"] = source_fixes
+                d["uuid"] = uuid or get_next_id()
+                d["quoted_value"] = quoted_value
+                d["escape_replacements"] = escape_replacements
+                d["casefold"] = None
+                d["_raw_value"] = (
+                    raw_str
+                    if quoted_value is None and escape_replacements is None
+                    else segment.normalize()
                 )
                 # Cache the original RsToken for efficient round-trip to the
                 # Rust parser (mirrors RawSegment.from_rstoken).
-                segment._rstoken = token
+                d["_rstoken"] = token
                 segments.append(segment)
 
             return (
