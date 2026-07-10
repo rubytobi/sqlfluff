@@ -691,6 +691,15 @@ try:
             Returns:
                 List of RsToken objects (or compatible token objects)
             """
+            try:
+                # Fast path: every segment carries its lexer token (the
+                # overwhelmingly common case) - a plain attribute load per
+                # segment beats a hasattr() check per segment at this volume
+                # (one call per token per parse).
+                return [segment._rstoken for segment in segments]
+            except AttributeError:
+                pass
+
             tokens = []
             for segment in segments:
                 # Check if segment has _rstoken attribute (cached original token)
