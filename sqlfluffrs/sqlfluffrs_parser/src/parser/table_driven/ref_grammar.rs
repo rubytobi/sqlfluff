@@ -240,6 +240,49 @@ impl Parser<'_> {
         // Build final result
         let final_pos = frame.end_pos.unwrap_or(frame.pos);
         let result_match = if let Some(ref_match_result) = &state.match_result {
+            let child = Arc::clone(ref_match_result);
+            let name = state.name;
+            let grammar_id = state.grammar_id;
+            let segment_class_name = state.segment_class_name.take();
+            let segment_type = state.segment_type;
+            let saved_pos = state.saved_pos;
+            self.build_ref_wrap(
+                name,
+                grammar_id,
+                segment_class_name,
+                segment_type,
+                saved_pos,
+                final_pos,
+                &child,
+            )
+        } else {
+            MatchResult::empty_at(frame.pos)
+        };
+
+        self.pos = final_pos;
+        frame.end_pos = Some(final_pos);
+        frame.state = FrameState::Complete(Arc::new(result_match));
+
+        Ok(TableFrameResult::Push(frame))
+    }
+
+    /// Wrap a Ref target's match result exactly as `handle_ref_combining`
+    /// does: compute the effective segment type (including the isinstance
+    /// path for bare token matches), build the MatchedClass from the
+    /// grammar tables, and produce the final `ref_match`. Shared by the
+    /// frame-based combining handler and the frame-free Ref fast path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build_ref_wrap(
+        &mut self,
+        name: &'static str,
+        grammar_id: GrammarId,
+        segment_class_name: Option<&'static str>,
+        segment_type: Option<&'static str>,
+        saved_pos: usize,
+        final_pos: usize,
+        ref_match_result: &Arc<MatchResult>,
+    ) -> MatchResult {
+        {
             // Debug: print accumulated children to inspect whether typed tokens are present
             vdebug!(
                 "Ref[table] Combining DEBUG: accumulated nodes={:?}",
@@ -262,7 +305,7 @@ impl Parser<'_> {
             // grammar-table string into the node with no allocation. Only the
             // isinstance override (a runtime token type) takes the owned branch.
             let effective_segment_type: Cow<'static, str> = if let Some(seg_type) =
-                state.segment_type
+                segment_type
             {
                 // Check if the child match is a bare single-token match (no matched_class)
                 // by looking at the match_result's matched_class and slice length
@@ -300,25 +343,23 @@ impl Parser<'_> {
                     Cow::Borrowed(seg_type)
                 }
             } else {
-                Cow::Borrowed(state.segment_type.unwrap_or_default())
+                Cow::Borrowed(segment_type.unwrap_or_default())
             };
 
             vdebug!(
                 "Ref[table] Combining: name='{}', effective_segment_type='{}', creating ref_match",
-                state.name,
+                name,
                 effective_segment_type
             );
             let matched_class = if !effective_segment_type.is_empty()
-                || state.segment_class_name.is_some()
+                || segment_class_name.is_some()
             {
                 // Look up the Python _class_types hierarchy for this grammar from codegen tables.
-                let class_types = self.grammar_ctx.segment_class_types(state.grammar_id);
+                let class_types = self.grammar_ctx.segment_class_types(grammar_id);
                 Some(MatchedClass {
-                    // take() instead of clone() + unwrap — frame context is not read
-                    // again after this point (state transitions to Complete).
                     // segment_class_name is Option<&'static str> (PR #8002), so
                     // borrow the grammar-table class name straight into the node.
-                    class_name: Cow::Borrowed(state.segment_class_name.take().unwrap_or_default()),
+                    class_name: Cow::Borrowed(segment_class_name.unwrap_or_default()),
                     segment_type: Some(effective_segment_type),
                     segment_kwargs: SegmentKwargs {
                         class_types,
@@ -329,24 +370,102 @@ impl Parser<'_> {
                 None
             };
 
-            // let start_idx = self.skip_start_index_forward_to_code(*saved_pos, final_pos);
-
             MatchResult::ref_match(
-                state.name,
+                name,
                 matched_class,
-                // start_idx,
-                state.saved_pos,
+                saved_pos,
                 final_pos,
                 vec![Arc::clone(ref_match_result)],
             )
-        } else {
-            MatchResult::empty_at(frame.pos)
+        }
+    }
+
+    /// Frame-free fast path for `Ref` grammars whose resolved target is a
+    /// terminal parser.
+    ///
+    /// Mirrors the frame-based Ref handlers step for step: the
+    /// parent-max-idx guard and failed-resolution behaviour of
+    /// `handle_ref_initial` (empty result at the pre-skip position), the
+    /// leading-gap skip when the target allows gaps, the failed-child
+    /// position semantics of `handle_ref_waiting_for_child` (position and
+    /// reported extent at the post-skip position), and the result wrapping
+    /// of `handle_ref_combining` (via `build_ref_wrap`). Refs with an
+    /// exclude grammar or a non-terminal target return `Ok(None)` and take
+    /// the frame path.
+    pub(crate) fn try_ref_terminal_inline(
+        &mut self,
+        grammar_id: GrammarId,
+        parent_max_idx: Option<usize>,
+    ) -> Result<Option<MatchResult>, ParseError> {
+        use sqlfluffrs_types::GrammarVariant;
+
+        // Excludes can be compound grammars; leave those to the frame path.
+        if self.grammar_ctx.exclude(grammar_id).is_some() {
+            return Ok(None);
+        }
+        let start_pos = self.pos;
+        let Some(child_id) = self.resolve_ref_target(grammar_id) else {
+            // No element child and no dialect mapping: Ref yields Empty.
+            return Ok(Some(MatchResult::empty_at(start_pos)));
         };
-
+        let child_variant = self.grammar_ctx.variant(child_id);
+        let is_terminal = matches!(
+            child_variant,
+            GrammarVariant::StringParser
+                | GrammarVariant::TypedParser
+                | GrammarVariant::MultiStringParser
+                | GrammarVariant::RegexParser
+                | GrammarVariant::Token
+        );
+        if !is_terminal {
+            return Ok(None);
+        }
+        // Python parity: beyond the parent's ceiling a Ref returns Empty.
+        if let Some(parent_max) = parent_max_idx {
+            if start_pos >= parent_max {
+                return Ok(Some(MatchResult::empty_at(start_pos)));
+            }
+        }
+        // Skip leading non-code when the target allows gaps (mirrors
+        // handle_ref_initial's child_start_pos).
+        let child_allows_gaps = self.grammar_ctx.inst(child_id).flags.allow_gaps();
+        let child_start_pos = if child_allows_gaps {
+            self.skip_start_index_forward_to_code(start_pos, self.tokens.len())
+        } else {
+            start_pos
+        };
+        self.pos = child_start_pos;
+        let mr = match child_variant {
+            GrammarVariant::StringParser => self.handle_string_parser(child_id)?,
+            GrammarVariant::TypedParser => self.typed_parser_match(child_id)?,
+            GrammarVariant::MultiStringParser => self.handle_multi_string_parser(child_id)?,
+            GrammarVariant::RegexParser => self.handle_regex_parser(child_id)?,
+            GrammarVariant::Token => self.handle_token(child_id)?,
+            _ => unreachable!(),
+        };
+        if mr.is_empty() {
+            // Failed child: extent and position are the post-skip position
+            // (handle_ref_waiting_for_child's original_pos semantics), while
+            // the empty result itself sits at the Ref's own position
+            // (handle_ref_combining's `empty_at(frame.pos)`).
+            self.pos = child_start_pos;
+            return Ok(Some(MatchResult::empty_at(start_pos)));
+        }
+        let final_pos = self.pos;
+        let rule_name = self.grammar_ctx.ref_name(grammar_id);
+        let segment_class_name = self.grammar_ctx.segment_class(grammar_id);
+        let segment_type = self.grammar_ctx.segment_type(grammar_id);
+        let child = Arc::new(mr);
+        let wrapped = self.build_ref_wrap(
+            rule_name,
+            grammar_id,
+            segment_class_name,
+            segment_type,
+            child_start_pos,
+            final_pos,
+            &child,
+        );
         self.pos = final_pos;
-        frame.end_pos = Some(final_pos);
-        frame.state = FrameState::Complete(Arc::new(result_match));
-
-        Ok(TableFrameResult::Push(frame))
+        Ok(Some(wrapped))
     }
 }
