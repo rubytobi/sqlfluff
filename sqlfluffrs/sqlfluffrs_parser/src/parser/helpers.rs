@@ -217,7 +217,7 @@ impl<'a> Parser<'a> {
         local_terminators: &[GrammarId],
         parent_terminators: &[GrammarId],
         reset_terminators: bool,
-    ) -> SmallVec<[GrammarId; 4]> {
+    ) -> SmallVec<[GrammarId; 12]> {
         if reset_terminators {
             SmallVec::from_slice(local_terminators)
         } else {

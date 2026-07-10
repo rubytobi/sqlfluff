@@ -19,7 +19,9 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 from sqlfluff.core.config import FluffConfig
 from sqlfluff.core.errors import SQLParseError
+from sqlfluff.core.helpers.identity import get_next_id
 from sqlfluff.core.parser.context import ParseContext
+from sqlfluff.core.parser.markers import PositionMarker
 from sqlfluff.core.parser.match_result import MatchResult, _get_point_pos_at_idx
 from sqlfluff.core.parser.segments import (
     BaseFileSegment,
@@ -27,6 +29,7 @@ from sqlfluff.core.parser.segments import (
     Dedent,
     ImplicitIndent,
     Indent,
+    MetaSegment,
     TemplateSegment,
     UnparsableSegment,
 )
@@ -708,6 +711,58 @@ try:
         # Maps the insert codes emitted by RsMatchResult.flatten() to meta
         # segment classes: 0=Indent, 1=ImplicitIndent, 2=Dedent.
         _META_BY_CODE = (Indent, ImplicitIndent, Dedent)
+        # Whether all meta classes use the stock constructors, making the
+        # direct-construction fast path in _make_meta safe.
+        _META_FAST = all(
+            cls.__init__ is MetaSegment.__init__ for cls in _META_BY_CODE
+        )
+
+        @staticmethod
+        def _make_meta(
+            meta_cls: type, segments: tuple["BaseSegment", ...], idx: int
+        ) -> "BaseSegment":
+            """Construct an Indent/Dedent meta at a point position, directly.
+
+            Equivalent to ``meta_cls(pos_marker=_get_point_pos_at_idx(...))``
+            but populating the instance dict in one go (the classes are
+            verified at import time to use the stock MetaSegment/RawSegment
+            constructors - see ``_META_FAST``). Metas are inserted at every
+            indent/dedent trigger, so this runs thousands of times per file.
+            """
+            if idx < len(segments):
+                pm = segments[idx].pos_marker
+                assert pm, "Segments passed to .apply() should all have position."
+                # A start point marker, carrying the working position forward
+                # (mirrors PositionMarker.start_point_marker).
+                src = pm.source_slice.start
+                tmpl = pm.templated_slice.start
+                pos = PositionMarker(
+                    slice(src, src),
+                    slice(tmpl, tmpl),
+                    pm.templated_file,
+                    pm.working_line_no,
+                    pm.working_line_pos,
+                )
+            else:
+                pos = _get_point_pos_at_idx(segments, idx)
+            seg = meta_cls.__new__(meta_cls)
+            d = seg.__dict__
+            d["pos_marker"] = pos
+            d["_raw"] = ""
+            d["_raw_upper"] = ""
+            d["segments"] = ()
+            d["instance_types"] = ()
+            d["trim_start"] = None
+            d["trim_chars"] = None
+            d["_source_fixes"] = None
+            d["uuid"] = get_next_id()
+            d["quoted_value"] = None
+            d["escape_replacements"] = None
+            d["casefold"] = None
+            d["_raw_value"] = ""
+            d["is_template"] = False
+            d["block_uuid"] = None
+            return seg
 
         def _apply_flat_match(
             self,
@@ -728,6 +783,13 @@ try:
             cursor = 0
             get_class = self._get_segment_class_by_name
             meta_by_code = self._META_BY_CODE
+            if self._META_FAST:
+                make_meta = self._make_meta
+            else:  # pragma: no cover
+
+                def make_meta(meta_cls, segs, idx):
+                    return meta_cls(pos_marker=_get_point_pos_at_idx(segs, idx))
+
             saw_unparsable = False
 
             def build() -> tuple["BaseSegment", ...]:
@@ -766,10 +828,9 @@ try:
                                 f"Tried to insert @{idx} outside of matched "
                                 f"slice {(start, stop)}"
                             )
-                            _pos = _get_point_pos_at_idx(segments, idx)
                             parse_context.increment_parse_nodes()
                             result_segments_list.append(
-                                meta_by_code[code](pos_marker=_pos)
+                                make_meta(meta_by_code[code], segments, idx)
                             )
                     return tuple(result_segments_list)
 
@@ -794,8 +855,9 @@ try:
                                 "contains overlapping child matches. This "
                                 "MatchResult was wrongly constructed."
                             )
-                        _pos = _get_point_pos_at_idx(segments, idx)
-                        result_segments_list.append(meta_by_code[code](pos_marker=_pos))
+                        result_segments_list.append(
+                            make_meta(meta_by_code[code], segments, idx)
+                        )
                     child_stop = flat[cursor][1]
                     if child_start > max_idx:
                         result_segments_list.extend(segments[max_idx:child_start])
@@ -821,8 +883,9 @@ try:
                             "overlapping child matches. This MatchResult was "
                             "wrongly constructed."
                         )
-                    _pos = _get_point_pos_at_idx(segments, idx)
-                    result_segments_list.append(meta_by_code[code](pos_marker=_pos))
+                    result_segments_list.append(
+                        make_meta(meta_by_code[code], segments, idx)
+                    )
 
                 # Anything left after the last trigger.
                 if max_idx < stop:
