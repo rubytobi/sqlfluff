@@ -8,7 +8,10 @@ new parser/benchmark performance work** — it lists what was measured to work,
 and (equally important) what was measured NOT to work.
 
 **Result: 19,336,856,656 → 8,995,175,662 instructions per iteration (−53.5%)**
-across 25 commits, with byte-identical parse trees throughout.
+across 25 commits, with byte-identical parse trees throughout. A later
+allocator pass (mimalloc + two per-frame `Vec` elisions) took this a further
+**−12.5%** to **7,867,637,585 Ir/iter** (fat LTO) — cumulative **−59.3%** from
+the original 19.34G baseline. See "Allocation pass" below.
 
 ## Methodology (reproduce before optimizing)
 
@@ -55,6 +58,47 @@ across 25 commits, with byte-identical parse trees throughout.
 
 Final definitive (fat LTO, n1/n3): **8,995,175,662 Ir/iter = −53.48%**.
 
+## Allocation pass (mimalloc + per-frame Vec elision)
+
+A follow-up campaign driven by `valgrind --tool=dhat` (heap profiling) rather
+than callgrind. DHAT on the native-AST TPC-DS pass showed ~7.9M allocations
+totalling ~1.96 GB, dominated by fixed-size churn: `Box<TableParseFrame>`
+(1.37M blocks / 514 MB — one per grammar frame) and `Arc<MatchResult>` (~1.5M
+blocks — one per match). The matching callgrind baseline attributed ~1.71G
+Ir/iter (≈17% of the total) to the glibc malloc/free family alone
+(`_int_malloc` 0.44G, `_int_free` 0.46G, `malloc`/`free`/`malloc_consolidate`
+the rest).
+
+| Change | Effect |
+|---|---|
+| **mimalloc as the extension's `#[global_allocator]`** (`sqlfluffrs/Cargo.toml` + `src/lib.rs`, gated on the `python` feature) — services the parser's fixed-size `Box`/`Arc` blocks from a segregated free-list instead of glibc's bin-management path | the bulk of the −12.3% |
+| **`handle_sequence_initial`: borrow children via `children_ids_slice()`** instead of `children(..).collect::<Vec>()` — the same static-table slice the WaitingForChild handler already uses (DHAT: ~308k allocs/pass) | folded into the pass total |
+| **`handle_sequence_child_success`: `extend(child.child_matches.iter().cloned())`** instead of `extend(child.child_matches.clone())`, and `.iter().copied()` for the Copy insert tuples — drops the throwaway intermediate `Vec` (DHAT: ~190k allocs/pass) | folded into the pass total |
+
+Definitive (committed fat LTO + codegen-units=1, n1/n3):
+**8,995,175,662 → 7,867,637,585 Ir/iter = −12.53%** (−1,127,538,077). The
+thin-LTO build used for iteration measured the same swing independently
+(9,013,832,742 → 7,901,134,601 = −12.34%). Parity gate: byte-identical
+stringify + raws + position markers + `as_record()` + violations digests
+across all 121 TPC-H/TPC-DS fixtures, on both builds. Almost all of the win is
+the allocator swap — the two Vec elisions are small on their own but remove
+real per-frame allocations that compound across the ~23k frames a 4-query pass
+builds.
+
+Notes/gotchas from this pass:
+- **DHAT cannot measure the *post*-mimalloc build**: DHAT intercepts
+  `malloc`/`free`, but mimalloc satisfies allocations from `mmap` directly, so
+  a DHAT run on the mimalloc build reports almost no heap traffic. Use
+  callgrind (instruction count — the CodSpeed metric) for the before/after,
+  and DHAT only on a *glibc* build to find allocation *sites*.
+- mimalloc's one-time heap init lands in both n1 and n3, so it cancels out of
+  `(Ir(n3) − Ir(n1)) / 2`; the per-iteration figure is clean.
+- `children_ids_slice()` returns `&'a [GrammarId]` tied to the grammar tables,
+  not to `&self`, so it stays live across the `&mut self` calls in the handler
+  — the borrow the Sequence WaitingForChild path already depended on.
+- The allocator is gated on the `python` feature so a plain
+  `cargo build --workspace` (CI, unit tests) keeps the system allocator.
+
 ## Tried and rejected — do not redo without new evidence
 
 All measured on the same harness; numbers are per-iteration instruction deltas.
@@ -82,9 +126,12 @@ All measured on the same harness; numbers are per-iteration instruction deltas.
   ~120M. Match attempts and pruning volumes are already minimal
   (~22.9k attempts / 93.4k options pruned per 4 queries, unchanged by the
   inlining work — the frames were the cost, not the matching).
-- Most promising next levers, in rough order: allocator-level work
-  (mimalloc, or arena/pooling for frames and `MatchResult`s — but see the
-  free-list result above), remaining Python-side tree construction, PGO.
+- Most promising next levers, in rough order: ~~allocator-level work
+  (mimalloc, …)~~ **done — see "Allocation pass" above (−12.3%)**; remaining
+  per-frame `Vec`/`SmallVec` churn (`local_terminators` still collects in the
+  OneOf/Ref/Delimited/AnyNumberOf initials, and the AnyNumberOf
+  `option_counter` HashMap — all now cheap under mimalloc but still real
+  allocations); remaining Python-side tree construction; PGO.
 
 ## Invariants and gotchas (violating these broke parity or tests)
 
