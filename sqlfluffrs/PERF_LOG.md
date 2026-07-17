@@ -162,3 +162,86 @@ All measured on the same harness; numbers are per-iteration instruction deltas.
 - `maturin build` must run from `sqlfluffrs/` (the `pyproject.toml` there
   carries the required `features = [..., "python"]`); passing
   `-m sqlfluffrs_python/Cargo.toml` from elsewhere fails feature resolution.
+
+## Wall-time comparison: merge-base vs. each split-out branch (July 2026)
+
+The commits above were split out of the single `perf/additional-improvements`
+branch into independent, per-idea branches (one dependency-stack per branch;
+see each branch's own commit(s) for the individual rationale), rebased onto
+`sqlfluff/sqlfluff@main` (`589b1fb`, "Don't hoist a subquery correlated in a
+later set expression branch (#8169)") — this is the `merge-base` row below.
+This section measures **wall time**, not instructions: CodSpeed's
+simulation-mode instruction counts (above) are the comparable-across-runs
+metric; wall time is included here because it's what the split-out branches
+need reviewed against for a real merge decision.
+
+**Methodology**:
+- Each branch was built with `maturin develop --release -F python` in its own
+  git worktree (release profile; fat LTO only for `fat-lto-codegen-units`,
+  thin/default elsewhere) and benchmarked in isolation — one Python venv,
+  builds done sequentially, never concurrently.
+- 6 configs per branch: {TPC-H, TPC-DS} query suites × {pure-Python parser
+  (`use_rust_parser=False`), Rust legacy convert+apply path, Rust native-AST
+  path (`set_native_ast(True)`)} — mirrors
+  `test/test_codspeed_tpc_parse.py`'s 6 benchmarks. One "sample" = one
+  `Linter.parse_string` pass over the full query suite (22 TPC-H / 99
+  TPC-DS queries), `time.perf_counter()`, GC disabled during timing, one
+  uncounted warmup pass first.
+- Adaptive sampling in steps of 5: after each batch of 5, stop once the
+  **relative standard error of the mean** (`stdev/sqrt(n)/mean`) drops below
+  1%, capped at 500 samples. (Raw sample-to-sample CV on this shared/
+  virtualized sandbox has an intrinsic noise floor of ~1-5% that does *not*
+  shrink with more samples — verified up to n=200 — so it isn't a viable
+  stopping criterion here; SEM-of-the-mean does shrink as 1/sqrt(n) under
+  that same noise and is what's reported as "converged" below.) All 66
+  cells (11 branches × 6 configs) converged, mostly at n=5, worst case
+  n=20.
+- TPC-H/TPC-DS fixtures: same Apache Doris-sourced queries as
+  `sqlfluffrs_benchmarks/build.rs` / the CodSpeed suite (SHA
+  `3a2d9d55f1e8e2d74187179ef89c36c8562815fd`).
+- `docs/perf-log-campaign` (this file + `AGENTS.md` only) is not benchmarked
+  — no code change, so no runtime effect.
+
+**Caveat**: each branch's 6 samples-batches converged to <1% SEM
+*within that branch's own benchmark run*, but the 11 runs were done
+sequentially over about an hour of wall-clock, on a shared sandbox, so
+cross-branch deltas below could still carry some run-to-run environmental
+drift (noisy-neighbor load, thermal state) that isn't captured by
+within-run SEM. Treat deltas under ~2% as noise; `match-result-apply-
+sorted-triggers`'s apparent regression in particular should be re-checked
+before drawing conclusions, since a HashMap→sorted-merge rewrite should not
+plausibly be slower.
+
+Mean wall time per full-suite pass, `Δ%` vs. merge-base (negative = faster):
+
+| branch | python tpch | python tpcds | rust-legacy tpch | rust-legacy tpcds | native-ast tpch | native-ast tpcds |
+|---|---|---|---|---|---|---|
+| merge-base (`589b1fb`) | 1703ms | 18360ms | 321ms | 3100ms | 342ms | 3145ms |
+| native-ast-hotpath-fusion (`575d90d`) | −2.1% | +0.6% | −1.5% | −1.5% | **−13.0%** | **−16.1%** |
+| lexer-segment-construction-fastpath (`353798a`) | −0.1% | −0.9% | −4.0% | **−7.8%** | **−11.2%** | **−8.5%** |
+| jinja-skip-positionmarker-slots (`13c3f14`) | +6.3% | +1.1% | **−15.8%** | −4.6% | **−16.3%** | **−10.9%** |
+| frame-cache-key (`49d18f1`, incl. box-parse-frame prereq) | +0.3% | +0.2% | **−16.6%** | **−11.3%** | **−16.3%** | **−11.2%** |
+| match-result-apply-sorted-triggers (`8aef8f7`) | +4.4% | +3.3% | +4.2% | +7.7% | +0.2% | +2.5% |
+| raw-segment-skip-normalize (`e27a2ca`) | −0.5% | +1.9% | −2.2% | +3.0% | −4.2% | +2.2% |
+| grammar-match-allocations (`4ec24d6`) | +1.5% | +2.7% | −1.1% | +0.2% | −5.4% | −4.8% |
+| rawstring-arc (`c01f7eb`) | −1.8% | +2.3% | +0.2% | +2.7% | −2.6% | −1.0% |
+| fat-lto-codegen-units (`66d8767`) | −0.8% | +2.4% | +2.6% | −3.0% | −7.5% | −5.5% |
+| parse-profile-instrumentation (`7536012`) | −0.8% | +0.8% | −0.5% | +1.1% | −4.2% | +3.2% |
+
+**Reading this**: the pure-Python parser path is flat everywhere (expected —
+none of these branches touch `src/sqlfluff/core/parser/*` code paths used
+only when `use_rust_parser=False`, beyond the shared `jinja.py`/`markers.py`
+edits in `jinja-skip-positionmarker-slots`, which nets out near zero there
+too). The four branches with clear, consistent wins across *both* rust
+paths and *both* suites — `native-ast-hotpath-fusion`, `lexer-segment-
+construction-fastpath`, `jinja-skip-positionmarker-slots`, and `frame-
+cache-key` — are the strongest wall-time candidates; `frame-cache-key` and
+`jinja-skip-positionmarker-slots` show large legacy-path wins too, not just
+native-AST. `grammar-match-allocations`, `rawstring-arc`, and `fat-lto-
+codegen-units` show smaller, native-AST-only improvements, consistent with
+being lower-level allocation/build-flag changes rather than hot-path
+restructuring. `match-result-apply-sorted-triggers` shows a small but
+consistent regression across every config, which contradicts its
+instruction-count rationale (HashMap removal) — worth re-benchmarking in
+isolation (ideally with `callgrind`, which isn't subject to this sandbox's
+wall-clock noise) before trusting either result.
