@@ -122,6 +122,16 @@ class TableBuilder:
         # Python may reuse memory addresses for new objects after GC, which
         # would cause incorrect cache hits in grammar_to_id when using id().
         self._synthetic_grammars: List = []
+        # The same id()-reuse hazard applies to EVERY grammar object we cache
+        # in grammar_to_id, not just the synthetic ones: dialect expansion and
+        # grammar properties produce transient objects, and once one of those
+        # is flattened and garbage-collected, an unrelated later grammar can
+        # be allocated at the same address and silently inherit its cached
+        # GrammarId - wiring a semantically wrong subgrammar into the emitted
+        # tables (e.g. oracle's Ref("AttributeIndicatorSegment") picking up a
+        # dead Ref("ModuloSegment") entry). Pin every cached grammar for the
+        # builder's lifetime so no id() is ever reused while cached.
+        self._cached_grammars: List = []
         self.hint_to_id: Dict[Tuple[Tuple[str, ...], Tuple[str, ...]], int] = {}
 
     def _add_string(self, s: str) -> int:
@@ -272,6 +282,9 @@ class TableBuilder:
         # instruction will end up at the wrong index!
         grammar_id = len(self.instructions)
         self.grammar_to_id[python_id] = grammar_id
+        # Pin the object so its id() cannot be reused by a different grammar
+        # while the cache entry is live (see _cached_grammars in __init__).
+        self._cached_grammars.append(grammar)
         self.instructions.append(None)  # Reserve slot - will be replaced below
         # Reserve a slot for the segment_type offset (default: no type)
         self.segment_type_offsets.append(0xFFFFFFFF)

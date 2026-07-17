@@ -261,10 +261,20 @@ tsql_dialect.insert_lexer_matchers(
         RegexLexer(
             "numeric_literal",
             (
+                # NOTE: The currency symbols are sorted so the built pattern is
+                # byte-stable across processes. `sets()` is an unordered set and
+                # its iteration order depends on the interpreter's hash seed;
+                # inside a regex character class the order is semantically
+                # irrelevant, but the Rust dialect codegen (utils/rustify.py)
+                # snapshots this pattern into a generated file, and an unstable
+                # ordering makes that file unreproducible (the freshness check
+                # then flags a mismatch on every run).
                 r"([xX]'([\da-fA-F][\da-fA-F])+'"
                 r"|0[xX][\da-fA-F]*"
-                r"|[+-]*[" + "".join(tsql_dialect.sets("currency_symbols")) + r"]"
-                r"[" + "".join(tsql_dialect.sets("currency_symbols")) + r"+-]*"
+                r"|[+-]*["
+                + "".join(sorted(tsql_dialect.sets("currency_symbols")))
+                + r"]"
+                r"[" + "".join(sorted(tsql_dialect.sets("currency_symbols"))) + r"+-]*"
                 r"(?>\d+\.\d+|\d+\.(?![\.\w])|\.\d+|\d+))"
             ),
             LiteralSegment,

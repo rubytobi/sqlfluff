@@ -1483,10 +1483,13 @@ impl<'a> Parser<'a> {
             }
 
             // This is a non-code token - skip it
+            // NOTE: Copy the debug fields out before bump() - holding `tok`
+            // (an immutable borrow of self) across the mutable bump() call
+            // does not compile when the verbose-debug feature is enabled.
             #[cfg(feature = "verbose-debug")]
-            let typ = tok.get_type();
+            let typ = tok.get_type().to_string();
             #[cfg(feature = "verbose-debug")]
-            let raw = tok.raw();
+            let raw = tok.raw().to_string();
             self.bump();
             count += 1;
 
