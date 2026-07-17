@@ -892,6 +892,47 @@ def test__rust_parser__native_ast_alternating_modes_shared_instance():
 
 
 @pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+def test__rust_parser__native_ast_quoted_value_normalization_kwargs():
+    """Both build paths thread quoted-literal normalization kwargs identically.
+
+    The Rust parser emits quoted_value / escape_replacement for quoted
+    literals (thousands of nodes across the fixture corpus), and
+    _rs_match_fields forwards them as segment kwargs that rules like RF06
+    consume for quote normalization. These lines were wrongly marked
+    ``pragma: no cover`` as if unreachable; this pins both that the kwargs
+    actually arrive on the built segments, and that both build paths carry
+    identical values.
+    """
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser import Lexer
+    from sqlfluff.core.parser.rust_parser import set_native_ast
+
+    sql = "SELECT CAST('RC Cola' AS varchar) AS brand FROM t"
+    config = FluffConfig(overrides={"dialect": "ansi"})
+    segments, _ = Lexer(config=config).lex(sql)
+
+    def quoted_kwargs(native: bool):
+        set_native_ast(native)
+        try:
+            tree = RustParser(config=config).parse(segments, fname="t.sql")
+        finally:
+            set_native_ast(False)
+        return [
+            (seg.raw, seg.quoted_value, seg.escape_replacements)
+            for seg in tree.recursive_crawl_all()
+            if getattr(seg, "quoted_value", None)
+        ]
+
+    legacy = quoted_kwargs(native=False)
+    native = quoted_kwargs(native=True)
+    # The quoted literal must actually carry normalization kwargs...
+    assert legacy, "expected quoted_value kwargs on the quoted literal"
+    assert legacy[0][0] == "'RC Cola'"
+    # ...and both build paths must agree on them exactly.
+    assert native == legacy
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
 def test__rust_parser__native_ast_root_match_logging_parity(caplog):
     r"""Both build paths emit byte-identical parser INFO diagnostics.
 

@@ -482,10 +482,14 @@ try:
                 elif rs_match.casefold == "lower":
                     segment_kwargs["casefold"] = str.lower
 
-            # Set quoted_value and escape_replacement for normalization
-            if rs_match.quoted_value:  # pragma: no cover
+            # Set quoted_value and escape_replacement for normalization.
+            # NOTE: These are hot paths, not dead code: the Rust parser emits
+            # them for quoted literals across the corpus (e.g. ansi
+            # single-quoted strings), and rules like RF06 consume the
+            # resulting normalization kwargs.
+            if rs_match.quoted_value:
                 segment_kwargs["quoted_value"] = rs_match.quoted_value
-            if rs_match.escape_replacement:  # pragma: no cover
+            if rs_match.escape_replacement:
                 segment_kwargs["escape_replacements"] = [rs_match.escape_replacement]
 
             # Extract insert_segments (Indent/Dedent meta segments).
