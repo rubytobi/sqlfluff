@@ -4,6 +4,7 @@ use crate::parser::{
 };
 #[cfg(feature = "verbose-debug")]
 use crate::vdebug;
+use smallvec::SmallVec;
 use sqlfluffrs_types::GrammarId;
 use std::sync::Arc;
 
@@ -108,13 +109,13 @@ impl Parser<'_> {
         #[cfg(feature = "verbose-debug")]
         let pruned_children_count = pruned_children.len();
         let first_element = pruned_children[0];
-        let option_counter: hashbrown::HashMap<u64, usize> =
-            pruned_children.iter().map(|id| (id.0 as u64, 0)).collect();
+        // Counts start empty; increment_element_count inserts on first use.
+        let option_counter = SmallVec::new();
 
         // Combine terminators (read parent terminators from frame directly)
-        let local_terminators: Vec<GrammarId> = self.grammar_ctx.terminators(grammar_id).collect();
+        let local_terminators: &[GrammarId] = self.grammar_ctx.terminators_ids_slice(grammar_id);
         let all_terminators = Parser::combine_terminators(
-            &local_terminators,
+            local_terminators,
             &frame.table_terminators,
             reset_terminators,
         );

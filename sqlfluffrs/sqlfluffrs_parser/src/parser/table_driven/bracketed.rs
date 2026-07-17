@@ -24,13 +24,10 @@ impl Parser<'_> {
             frame.pos
         );
         let start_idx = frame.pos;
-        let local_terminators = self
-            .grammar_ctx
-            .terminators(grammar_id)
-            .collect::<Vec<GrammarId>>();
+        let local_terminators: &[GrammarId] = self.grammar_ctx.terminators_ids_slice(grammar_id);
         let reset_terminators = self.grammar_ctx.inst(grammar_id).flags.reset_terminators();
         let all_terminators = Self::combine_terminators(
-            &local_terminators,
+            local_terminators,
             &frame.table_terminators,
             reset_terminators,
         );

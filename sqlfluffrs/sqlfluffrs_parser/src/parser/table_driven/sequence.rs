@@ -44,10 +44,10 @@ impl Parser<'_> {
             );
         }
 
-        let local_terminators = self
-            .grammar_ctx
-            .terminators(seq_grammar_id)
-            .collect::<Vec<_>>();
+        // Same static-table borrow trick as `children_ids_slice` below: no
+        // per-frame Vec for the local terminators.
+        let local_terminators: &[GrammarId] =
+            self.grammar_ctx.terminators_ids_slice(seq_grammar_id);
         // Borrow the children as a static-table slice rather than collecting
         // into a per-frame Vec: the DHAT profile showed this collect as ~308k
         // allocations across a TPC-DS pass. `children_ids_slice` returns a
@@ -70,7 +70,7 @@ impl Parser<'_> {
         // trim_to_terminator / max_idx computation.
         let child_terminators = frame.table_terminators.to_vec();
         let all_terminators = Self::combine_terminators(
-            &local_terminators,
+            local_terminators,
             &frame.table_terminators,
             reset_terminators,
         );

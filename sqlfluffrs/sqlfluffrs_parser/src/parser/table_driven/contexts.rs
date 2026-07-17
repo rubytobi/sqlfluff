@@ -119,9 +119,18 @@ impl crate::parser::AnyNumberOfState {
 
     #[inline]
     pub(crate) fn increment_element_count(&mut self, element_key: u64) -> usize {
-        let count_for_element = self.option_counter.entry(element_key).or_insert(0);
-        *count_for_element += 1;
-        *count_for_element
+        // Linear scan over a SmallVec: candidate lists are short, so this
+        // beats a HashMap probe and avoids the per-frame map allocation.
+        if let Some((_, count)) = self
+            .option_counter
+            .iter_mut()
+            .find(|(key, _)| *key == element_key)
+        {
+            *count += 1;
+            return *count;
+        }
+        self.option_counter.push((element_key, 1));
+        1
     }
 
     #[inline]

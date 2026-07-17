@@ -25,7 +25,6 @@
 //!
 //! See the glossary in `ENGINE.md` for the full list.
 
-use hashbrown::HashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -87,7 +86,10 @@ pub struct AnyNumberOfState {
     pub count: usize,
     pub matched_idx: usize,
     pub working_idx: usize,
-    pub option_counter: HashMap<u64, usize>,
+    /// Per-element match counts for max_times_per_element tracking.
+    /// A small linear-scan vec, not a HashMap: candidate lists are short
+    /// (usually <= 8), and this avoids a per-frame heap allocation.
+    pub option_counter: SmallVec<[(u64, usize); 8]>,
     pub max_idx: usize,
     pub last_child_frame_id: Option<usize>,
     pub matched: Arc<MatchResult>,

@@ -60,9 +60,9 @@ impl Parser<'_> {
         let post_skip_pos = self.skip_to_code_if_gaps(start_pos, self.tokens.len(), allow_gaps);
 
         // Combine terminators (read parent terminators from frame directly)
-        let local_terminators: Vec<GrammarId> = self.grammar_ctx.terminators(grammar_id).collect();
+        let local_terminators: &[GrammarId] = self.grammar_ctx.terminators_ids_slice(grammar_id);
         let all_terminators = Parser::combine_terminators(
-            &local_terminators,
+            local_terminators,
             &frame.table_terminators,
             reset_terminators,
         );

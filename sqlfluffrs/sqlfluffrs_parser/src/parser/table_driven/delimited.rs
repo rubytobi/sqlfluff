@@ -80,11 +80,13 @@ impl Parser<'_> {
             .copied()
             .collect();
 
-        // Get local terminators (e.g., ObjectReferenceTerminatorGrammar)
-        let local_terminators: Vec<GrammarId> = self.grammar_ctx.terminators(grammar_id).collect();
-        let filtered_local: Vec<GrammarId> = local_terminators
+        // Get local terminators (e.g., ObjectReferenceTerminatorGrammar).
+        // Borrowed straight from the grammar tables - no intermediate Vec.
+        let filtered_local: Vec<GrammarId> = self
+            .grammar_ctx
+            .terminators_ids_slice(grammar_id)
             .iter()
-            .filter(|&term_id| self.grammar_ctx.grammar_id_name(*term_id) != delimiter_name)
+            .filter(|&&term_id| self.grammar_ctx.grammar_id_name(term_id) != delimiter_name)
             .copied()
             .collect();
 

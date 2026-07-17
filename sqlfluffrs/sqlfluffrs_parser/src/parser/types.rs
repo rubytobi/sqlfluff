@@ -1,6 +1,5 @@
 //! Core types for the parser: Grammar, Node, ParseMode
 
-use hashbrown::HashSet;
 use serde_yaml_ng::{Mapping, Value};
 use sqlfluffrs_types::{GrammarId, PositionMarker};
 use std::borrow::Cow;

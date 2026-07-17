@@ -174,6 +174,21 @@ impl<'a> GrammarContext<'a> {
         self.tables.get_terminators(inst)
     }
 
+    /// Like [`Self::terminators_slice`], but typed as `GrammarId`s - no
+    /// per-call `Vec` allocation. `GrammarId` is `#[repr(transparent)]` over
+    /// `u32`, so the cast is layout-safe. The `'a` lifetime ties the slice to
+    /// the static grammar tables (not `&self`), mirroring
+    /// [`Self::children_ids_slice`], so it stays valid across later `&mut`
+    /// calls on the parser.
+    #[inline]
+    pub fn terminators_ids_slice(&self, id: GrammarId) -> &'a [GrammarId] {
+        let inst = self.inst(id);
+        let ids: &'a [u32] = self.tables.get_terminators(inst);
+        // SAFETY: GrammarId is #[repr(transparent)] over u32, so &[u32] and
+        // &[GrammarId] have identical layout.
+        unsafe { std::slice::from_raw_parts(ids.as_ptr() as *const GrammarId, ids.len()) }
+    }
+
     /// Get number of terminators
     #[inline]
     pub fn terminators_count(&self, id: GrammarId) -> usize {

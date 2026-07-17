@@ -168,7 +168,7 @@ impl TableParseFrameStack {
     #[inline]
     pub(crate) fn gate_child_and_wait(
         &mut self,
-        mut parent: TableParseFrame,
+        mut parent: Box<TableParseFrame>,
         context_type: GrammarVariant,
         child_index: usize,
         pos: usize,
