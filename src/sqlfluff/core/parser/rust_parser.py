@@ -267,6 +267,15 @@ try:
                 if _NATIVE_AST_ENABLED:
                     # Fused path: instantiate segments directly from rs_match in a
                     # single pass (no intermediate Python MatchResult tree).
+                    # LOGGING PARITY: the legacy path logs the root match at INFO
+                    # below. Emit byte-identical output here, but only pay for
+                    # building the intermediate MatchResult when that log level
+                    # is actually enabled (it isn't in normal operation).
+                    if parser_logger.isEnabledFor(logging.INFO):
+                        parser_logger.info(
+                            "Root Match:\n%s",
+                            self._convert_rs_match_result(rs_match, code_segments),
+                        )
                     if _prof is not None:
                         _ts = time.perf_counter()
                     _matched = self._apply_rs_match_result(
@@ -523,14 +532,19 @@ try:
             # Convert child matches recursively
             # Note: Transparent grammar nodes are now flattened on the Rust side,
             # so we don't need to do it here anymore
-            child_matches = (
-                tuple(
-                    self._convert_rs_match_result(child, segments, depth + 1)
-                    for child in rs_match.child_matches
-                )
-                if rs_match.child_matches
-                else ()
-            )
+            # NOTE: An explicit loop, not a generator/comprehension. Those add a
+            # second live interpreter frame per recursion level, which made this
+            # path exhaust the Python stack at roughly half the nesting depth
+            # that MatchResult.apply and the fused native-AST builder tolerate
+            # (so the two build paths failed at different input sizes).
+            child_matches: tuple[MatchResult, ...] = ()
+            if rs_match.child_matches:
+                _children: list[MatchResult] = []
+                for child in rs_match.child_matches:
+                    _children.append(
+                        self._convert_rs_match_result(child, segments, depth + 1)
+                    )
+                child_matches = tuple(_children)
 
             return MatchResult(
                 matched_slice=slice(start, stop),

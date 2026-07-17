@@ -585,21 +585,31 @@ def test__rust_parser__native_ast_parity(sqlfile):
     config = FluffConfig(overrides={"dialect": sqlfile.parent.name})
     segments, _ = Lexer(config=config).lex(sqlfile.read_text(encoding="utf-8"))
 
-    def result_for(tree):
+    def result_for(tree, include_position=False):
         return (
             "tree",
-            tree.to_tuple(code_only=False, show_raw=True, include_meta=True)
+            tree.to_tuple(
+                code_only=False,
+                show_raw=True,
+                include_meta=True,
+                include_position=include_position,
+            )
             if tree
             else None,
         )
 
     def build_rust(native: bool):
+        # Returns (loose, strict): `loose` matches build_python's shape for
+        # the cross-engine comparison; `strict` additionally carries position
+        # markers and the exception message for the byte-level native-vs-
+        # legacy comparison (the two RustParser build paths share the same
+        # Rust match result, so they must agree down to those details too).
         set_native_ast(native)
         try:
             tree = RustParser(config=config).parse(segments, fname=str(sqlfile))
-            return result_for(tree)
+            return result_for(tree), result_for(tree, include_position=True)
         except BaseException as err:  # PanicException is a BaseException
-            return ("exc", type(err).__name__)
+            return ("exc", type(err).__name__), ("exc", type(err).__name__, str(err))
         finally:
             set_native_ast(False)
 
@@ -611,33 +621,33 @@ def test__rust_parser__native_ast_parity(sqlfile):
             return ("exc", type(err).__name__)
 
     python_result = build_python()
-    rust_default = build_rust(native=False)
-    rust_native = build_rust(native=True)
+    rust_default, rust_default_strict = build_rust(native=False)
+    rust_native, rust_native_strict = build_rust(native=True)
 
-    assert rust_native == rust_default, "native-AST path diverges from convert+apply"
+    assert rust_native_strict == rust_default_strict, (
+        "native-AST path diverges from convert+apply"
+    )
     assert python_result == rust_default, "RustParser diverges from Python Parser"
 
 
 @pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Regression: _convert_rs_match_result (the native_ast=False tree "
-        "builder) recurses through an extra generator-expression stack frame "
-        "per nesting level that _apply_rs_match_result (the fused "
-        "native_ast=True builder) doesn't have, so the legacy path blows the "
-        "Python call stack roughly twice as early as the fused path for the "
-        "same deeply-nested input. Only reachable when max_parse_depth is "
-        "raised above its default (600): at the default, the depth guard "
-        "fires first on both paths identically, masking the divergence."
-    ),
-)
-def test__rust_parser__native_ast_recursion_depth_asymmetry():
-    """native_ast=True tolerates deeper bracket nesting than native_ast=False.
+def test__rust_parser__native_ast_recursion_depth_parity():
+    """Both tree-building paths tolerate the same bracket-nesting depth.
 
-    Minimal repro for a real (if narrow) correctness divergence: with the
-    depth guard raised out of the way, the two AST-building paths do not
-    fail at the same input size for identical SQL and identical config.
+    Regression test: _convert_rs_match_result (the native_ast=False tree
+    builder) used to recurse through an extra generator-expression stack
+    frame per nesting level that _apply_rs_match_result (the fused
+    native_ast=True builder) doesn't have, so the legacy path blew the
+    Python call stack roughly twice as early as the fused path for the same
+    deeply-nested input: with the depth guard raised out of the way
+    (max_parse_depth=2000; at the default of 600 the depth guard fires
+    first on both paths identically, masking the divergence), 70 levels of
+    bracket nesting built a tree on the fused path but raised
+    RecursionError on the legacy path. The converter now builds child
+    matches with an explicit loop (one interpreter frame per level, like
+    MatchResult.apply and the fused builder), so both paths succeed here
+    and keep failing in lockstep (both RecursionError) at much deeper
+    nesting, past the shared stack budget.
     """
     from sqlfluff.core import FluffConfig
     from sqlfluff.core.parser import Lexer
@@ -653,14 +663,317 @@ def test__rust_parser__native_ast_recursion_depth_asymmetry():
             tree = RustParser(config=config).parse(segments, fname="t.sql")
             return (
                 "tree",
-                tree.to_tuple(code_only=False, show_raw=True, include_meta=True),
+                tree.to_tuple(
+                    code_only=False,
+                    show_raw=True,
+                    include_meta=True,
+                    include_position=True,
+                ),
             )
         except BaseException as err:  # PanicException/RecursionError, etc.
-            return ("exc", type(err).__name__)
+            return ("exc", type(err).__name__, str(err))
         finally:
             set_native_ast(False)
 
+    native_result = build(native=True)
+    legacy_result = build(native=False)
+    assert native_result == legacy_result
+    # Depth 70 is comfortably within the (now shared) stack budget: the
+    # parity above must come from both paths building the tree, not from
+    # both failing.
+    assert legacy_result[0] == "tree"
+
+
+# ---------------------------------------------------------------------------
+# Native (fused) AST builder vs. legacy convert+apply: strict byte-level parity
+#
+# Unlike the fixture sweep above (well-formed SQL only), these compare the two
+# RustParser tree-building paths on the corners the corpus doesn't reach:
+# malformed/error-recovery SQL (exceptions and UnparsableSegment wrapping),
+# no-code inputs (the early-return path), templated SQL (template placeholder
+# tokens and Linter-driven parsing), parser diagnostics logging, and parse-node
+# accounting (the max_parse_nodes budget). "Parity" here is strict: position
+# markers, stringify bytes, raw round-trip, exception type/message/attributes,
+# and node accounting must all be identical - both paths consume the same Rust
+# match result, so any difference is a bug in one of the builders.
+# ---------------------------------------------------------------------------
+
+
+def _compare_rust_native_vs_legacy(sql, dialect="ansi", config_overrides=None):
+    """Parse the same lexed SQL with both RustParser tree-building paths.
+
+    Returns (native_result, legacy_result) where each result captures the
+    built tree byte-for-byte (tuple form with positions, stringify, raw) or
+    the raised exception (type, message, and SQLBaseError attributes).
+    """
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser import Lexer
+    from sqlfluff.core.parser.rust_parser import set_native_ast
+
+    overrides = {"dialect": dialect}
+    if config_overrides:
+        overrides.update(config_overrides)
+    config = FluffConfig(overrides=overrides)
+    segments, _ = Lexer(config=config).lex(sql)
+
+    def build(native: bool):
+        set_native_ast(native)
+        try:
+            tree = RustParser(config=config).parse(segments, fname="t.sql")
+            if tree is None:
+                return ("none",)
+            return (
+                "tree",
+                tree.to_tuple(
+                    code_only=False,
+                    show_raw=True,
+                    include_meta=True,
+                    include_position=True,
+                ),
+                tree.stringify(),
+                tree.raw,
+            )
+        except BaseException as err:  # PanicException is a BaseException
+            return (
+                "exc",
+                type(err).__name__,
+                str(err),
+                getattr(err, "line_no", None),
+                getattr(err, "line_pos", None),
+                getattr(err, "fatal", None),
+                getattr(err, "ignore", None),
+                getattr(err, "warning", None),
+            )
+        finally:
+            set_native_ast(False)
+
+    return build(True), build(False)
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.parametrize(
+    "sql,dialect",
+    [
+        # Malformed SQL: partial matches, unparsable wrapping, error recovery.
+        ("SELECT CASE", "ansi"),
+        ("SELECT 1) FROM t", "ansi"),
+        ("WITH a AS (SELECT 1", "ansi"),
+        ("SELECT a FROM t WHERE a IN (1, )", "ansi"),
+        ("SELECT a[)", "ansi"),
+        ("SELECT a[(1]", "ansi"),
+        ("SELECT a(b[1", "ansi"),
+        ("SELECT a FROM t) UNION SELECT c", "ansi"),
+        ("SELECT (1 + 2", "ansi"),
+        ("SELECT 1 +", "ansi"),
+        ("SELECT", "ansi"),
+        ("FROM t", "ansi"),
+        ("!!!! ???", "ansi"),
+        ("SELECT 1; !!!! ; SELECT 2", "ansi"),
+        ("SELECT 1 -} FROM t", "snowflake"),
+        # No-code and trivia-only inputs (the early-return/trim paths).
+        ("", "ansi"),
+        ("   \n\t\n", "ansi"),
+        ("-- just a comment\n", "ansi"),
+        (";", "ansi"),
+        (";;;", "ansi"),
+        ("SELECT 1   \n-- comment\n   ", "ansi"),
+        ("/* c */ SELECT /* c2 */ 1 /* c3 */", "ansi"),
+    ],
+    ids=lambda val: repr(val)[:40],
+)
+def test__rust_parser__native_ast_strict_parity_edge_cases(sql, dialect):
+    """The two RustParser build paths agree byte-for-byte on edge-case SQL.
+
+    Guard for the fused native-AST builder on inputs outside the well-formed
+    fixture corpus: trees must match including position markers and stringify
+    bytes, and raised exceptions must match including message text and error
+    attributes - not just exception type.
+    """
+    native_result, legacy_result = _compare_rust_native_vs_legacy(sql, dialect)
+    assert native_result == legacy_result
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+def test__rust_parser__native_ast_root_match_logging_parity(caplog):
+    r"""Both build paths emit byte-identical parser INFO diagnostics.
+
+    Regression test: the fused native-AST builder used to skip the legacy
+    path's ``parser_logger.info("Root Match:\\n%s", match)`` diagnostic
+    entirely, so parsing the same SQL with parser logging enabled (e.g.
+    ``sqlfluff parse -vvvv``) produced different diagnostic bytes depending
+    on the native_ast flag. The native path now emits the identical record,
+    building the intermediate MatchResult it needs for the message only when
+    INFO logging is actually enabled (so the fused path stays conversion-free
+    in normal operation - see
+    test__rust_parser__native_ast_profile_has_no_convert_stage).
+    """
+    import logging
+
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser import Lexer
+    from sqlfluff.core.parser.rust_parser import set_native_ast
+
+    config = FluffConfig(overrides={"dialect": "ansi"})
+    segments, _ = Lexer(config=config).lex("SELECT a, b FROM t WHERE a = 1")
+
+    def parser_log_messages(native: bool):
+        caplog.clear()
+        set_native_ast(native)
+        try:
+            with caplog.at_level(logging.INFO, logger="sqlfluff.parser"):
+                RustParser(config=config).parse(segments, fname="t.sql")
+        finally:
+            set_native_ast(False)
+        return [rec.getMessage() for rec in caplog.records]
+
+    legacy_messages = parser_log_messages(native=False)
+    native_messages = parser_log_messages(native=True)
+
+    # The legacy path logs the root match; the native path must too.
+    assert any(msg.startswith("Root Match:") for msg in legacy_messages)
+    assert native_messages == legacy_messages
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Substituted variables (see the jinja context in the test body).
+        "SELECT {{ col }} FROM {{ table }}",
+        # Block placeholders with block_uuid metadata and loop repetition.
+        "SELECT a{% if true %}, b{% endif %} FROM t",
+        "SELECT {% for c in ['a','b'] %}{{ c }},{% endfor %} d FROM t",
+        # Comment/block-only sources (little or no rendered code).
+        "{# note #}SELECT 1",
+        "{% set x = 1 %}",
+        # Malformed rendered SQL from a templated source.
+        "SELECT {{ col }} FROM",
+    ],
+    ids=lambda sql: repr(sql)[:45],
+)
+def test__rust_parser__native_ast_templated_parity(sql):
+    """The two build paths agree byte-for-byte on Jinja-templated SQL.
+
+    Templated sources exercise a corner the raw-SQL fixture corpus can't:
+    TemplateSegment placeholder tokens (converted via
+    _template_segment_to_rstoken) and the Linter-driven parse path. Trees
+    must match including position markers, and lint violations (e.g.
+    templating/parse errors) must match too. Block UUIDs are freshly
+    randomized on every lex, so they are normalized out of the stringify
+    comparison - they differ between any two parses of the same file
+    regardless of build path.
+    """
+    import re
+
+    from sqlfluff.core import FluffConfig, Linter
+    from sqlfluff.core.parser.rust_parser import set_native_ast
+
+    def build(native: bool):
+        config = FluffConfig(
+            overrides={
+                "dialect": "ansi",
+                "templater": "jinja",
+                "use_rust_parser": True,
+                "rules": "none",
+            }
+        )
+        for key, val in {"col": "a", "table": "t"}.items():
+            config.set_value(["templater", "jinja", "context", key], val)
+        set_native_ast(native)
+        try:
+            parsed = Linter(config=config).parse_string(sql, fname="t.sql")
+        finally:
+            set_native_ast(False)
+        tree = parsed.tree
+        result = {
+            "violations": [(type(v).__name__, str(v)) for v in parsed.violations],
+            "tree": None,
+        }
+        if tree is not None:
+            result["tree"] = tree.to_tuple(
+                code_only=False,
+                show_raw=True,
+                include_meta=True,
+                include_position=True,
+            )
+            result["stringify"] = re.sub(
+                r"Block: '[0-9a-f]+'", "Block: '<uuid>'", tree.stringify()
+            )
+            result["raw"] = tree.raw
+        return result
+
     assert build(native=True) == build(native=False)
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+def test__rust_parser__native_ast_parse_node_accounting_parity(monkeypatch):
+    """Both build paths make identical parse-node accounting increments.
+
+    The max_parse_nodes budget (a DoS guard) is charged as the BaseSegment
+    tree is built - in MatchResult.apply on the legacy path and in
+    _apply_rs_match_result on the fused path. If the two paths counted
+    differently, the same SQL with the same max_parse_nodes limit could
+    parse under one flag and raise SQLParseError under the other. Assert
+    the final consumed budget is identical, and that behaviour at the exact
+    budget boundary (smallest passing limit, and one below it) is
+    byte-identical - the boundary probe is driven purely through SQL plus
+    config, exactly how a user would hit it.
+    """
+    from sqlfluff.core.parser.context import ParseContext
+
+    captured = []
+    orig_from_config = ParseContext.from_config.__func__
+
+    def _capturing_from_config(cls, config):
+        ctx = orig_from_config(cls, config)
+        captured.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(
+        ParseContext, "from_config", classmethod(_capturing_from_config)
+    )
+
+    sql = "SELECT a, b FROM t WHERE x = 1"
+
+    captured.clear()
+    _compare_rust_native_vs_legacy(sql)
+    # _compare_rust_native_vs_legacy parses native-first: one context is
+    # captured per parse.
+    assert len(captured) == 2
+    native_count, legacy_count = (ctx.current_parse_nodes for ctx in captured)
+    assert native_count == legacy_count
+
+    # Boundary behaviour: find the smallest max_parse_nodes that lets the
+    # legacy path build the tree (the effective floor may be enforced by
+    # either the shared Rust core or the Python-side ParseContext budget),
+    # then require the native path to agree byte-for-byte both at that
+    # limit and just below it (where both must raise the same SQLParseError).
+    lo, hi = 1, 4000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        _, legacy_result = _compare_rust_native_vs_legacy(
+            sql, config_overrides={"max_parse_nodes": mid}
+        )
+        if legacy_result[0] == "tree":
+            hi = mid
+        else:
+            lo = mid + 1
+    for limit in (lo, lo - 1):
+        native_result, legacy_result = _compare_rust_native_vs_legacy(
+            sql, config_overrides={"max_parse_nodes": limit}
+        )
+        assert native_result == legacy_result
+    # And the boundary is real: passing at the floor, SQLParseError below.
+    assert (
+        _compare_rust_native_vs_legacy(sql, config_overrides={"max_parse_nodes": lo})[
+            1
+        ][0]
+        == "tree"
+    )
+    below = _compare_rust_native_vs_legacy(
+        sql, config_overrides={"max_parse_nodes": lo - 1}
+    )[1]
+    assert below[0] == "exc" and below[1] == "SQLParseError"
 
 
 # ---------------------------------------------------------------------------
