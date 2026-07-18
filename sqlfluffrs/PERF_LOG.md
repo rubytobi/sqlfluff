@@ -400,3 +400,54 @@ levers that would plausibly deliver the rest, in rough order:
   compile (borrow error in a debug-only block in `core.rs`,
   `while let Some(tok) = self.peek()` + `self.bump()`); fix before relying
   on it for tracing.
+
+## Lexer pass (July 2026, same branch)
+
+Same playbook applied to the lexer. Split measurement first: a full
+`Linter`-path lex of all 121 fixtures was ~216ms, of which only ~67ms was
+the Rust lexer core (`_lex_segment_data`) and ~149ms the Python
+segment-construction loop (47,641 tokens, ~3.1us/token). Callgrind on a
+lex-only pass (`examples/lex_bench.rs`) showed the Rust side
+allocation-dominated (~30% malloc/free family) with specific offenders:
+
+| Change | What it fixes |
+|---|---|
+| Lazy preface suffix | `raw_token` ran `format!` + `escape_debug` (unicode printable-table walks) per token to fill a field only read by `preface()` (tree dumps) - ~6% of the whole lex pass. `suffix` is now `Option<Cow>`, `None` = derive on demand. |
+| `scan_match_into` / `subdivide_into` / `trim_match_into` | `scan_match` returned a fresh `Vec` per matched token (`vec![matched]` in the no-subdivider case); now pushes into the caller's element buffer. |
+| `iter_tokens` direct pushes | The flat_map closure allocated a `segments` Vec per element; now a for-loop pushing straight into the output. |
+| Shared `<unlexable>` last-resort matcher + `Cow<'static, [LexMatcher]>` | `Lexer::new` compiled the last-resort regex (~1.5M Ir) and deep-cloned all ~40 dialect matchers - and the linter constructs a Lexer per lexed file. Now a `Lazy` static + borrowed matcher slice. |
+| **First-byte gates** (`FirstByteSet`) | Every matcher ran its regex/`starts_with` at every token position in list order - `word`, the most common token, is last of 37, and the whitespace/newline/like-operator regexes had `\|_\| true` prechecks. Each matcher now carries a 256-bit set of possible first bytes, derived from its pattern's regex-syntax HIR (string templates: exact first byte; fancy-regex/function modes: all bytes; a pattern that can match empty: all bytes). The set over-approximates, so gating on it can only skip matchers that could never have matched. |
+| Boundary interning + `raw_upper` | `_lex_segment_data` now interns raw strings per call (SQL repeats keywords/punctuation constantly) and ships the Rust-side cached `raw_upper` as a 16th tuple element, so the Python loop stops calling `.upper()` per token. |
+
+**Results** (same sandbox/methodology as above):
+- Pure-Rust lex (`lex_bench`, glibc, per-suite pass): TPC-H 9.46ms → 2.17ms
+  (**−77%**), TPC-DS 64.98ms → 19.17ms (**−70%**), identical token counts.
+- Full pipeline (committed profile, no PGO), vs the pre-lexer state of this
+  branch / vs the combined-10 baseline at the start of this campaign:
+
+| config | pre-lexer | after | Δ step | Δ vs combined-10 baseline |
+|---|---|---|---|---|
+| python tpch | 1994ms* | 1753ms | −12% | **−12%** |
+| python tpcds | 22262ms | 19067ms | −14% | **−17%** |
+| rust-legacy tpch | ~195ms | 178ms | −9% | **−31%** |
+| rust-legacy tpcds | 2262ms | 1811ms | −20% | **−39%** |
+| rust-native-ast tpch | 153ms | 134ms | −13% | **−39%** |
+| rust-native-ast tpcds | 1642ms | 1322ms | −19% | **−40%** |
+
+(*) python-path pre-lexer numbers are the campaign baseline - none of the
+parser-pass changes touched that path; the lexer pass is its first real
+improvement (it shares `PyRsLexer`).
+
+**Gates**: byte-identical parity digests (121 fixtures × 3 parser paths),
+plus `test/core/parser` and the full `test/dialects` suite (9,302 tests) -
+the first-byte gates apply to every dialect's matcher list, so the dialect
+fixtures matter here.
+
+**Gotchas**:
+- `FirstByteSet::collect_hir` must treat zero-width nodes (`Look`) and
+  min-0 repetitions as "can match empty" so a following concat element's
+  first bytes are also included; a whole pattern that can match empty
+  (e.g. the `<unlexable>` last resort `[^\t\n\ ]*`) must fall back to
+  all-bytes.
+- The seg-data boundary tuple is now 16 elements; the Python fast loop
+  unpacks positionally.
