@@ -118,6 +118,11 @@ pub struct ParserMetrics {
     /// `try_terminal_inline` calls that fell back to the frame-based path
     /// (candidate was not a synchronous terminal variant).
     pub terminal_fast_path_misses: std::cell::Cell<usize>,
+    /// Frame-cache lookups per cacheable variant, indexed by
+    /// [`Parser::cache_variant_slot`]: 0=Ref, 1=OneOf, 2=Delimited, 3=Bracketed.
+    pub cache_gets_by_variant: [std::cell::Cell<usize>; 4],
+    /// Frame-cache hits per cacheable variant (same indexing).
+    pub cache_hits_by_variant: [std::cell::Cell<usize>; 4],
 }
 
 impl ParserMetrics {
@@ -153,6 +158,16 @@ impl ParserMetrics {
             "terminal_fast_path_misses".to_string(),
             self.terminal_fast_path_misses.get(),
         );
+        for (i, name) in ["ref", "oneof", "delimited", "bracketed"].iter().enumerate() {
+            m.insert(
+                format!("cache_gets_{name}"),
+                self.cache_gets_by_variant[i].get(),
+            );
+            m.insert(
+                format!("cache_hits_{name}"),
+                self.cache_hits_by_variant[i].get(),
+            );
+        }
         m
     }
 }

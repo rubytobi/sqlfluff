@@ -2,10 +2,6 @@
 use crate::vdebug;
 use sqlfluffrs_types::GrammarId;
 use sqlfluffrs_types::ParseMode;
-// Only the verbose-debug tracing blocks in this module reference GrammarVariant directly;
-// the default build's uses live behind function-local imports. cfg-gating avoids an
-// unused-import warning in non-verbose builds.
-#[cfg(feature = "verbose-debug")]
 use sqlfluffrs_types::GrammarVariant;
 use std::sync::Arc;
 
@@ -745,6 +741,17 @@ impl Parser<'_> {
     /// only through this one method, so the store key and the lookup key cannot drift —
     /// see the optimization preconditions in `ENGINE.md` (a drift here would silently corrupt the cache).
     #[inline]
+    /// Metrics slot for a cacheable variant (see `ParserMetrics::cache_gets_by_variant`).
+    #[inline]
+    fn cache_variant_slot(variant: GrammarVariant) -> usize {
+        match variant {
+            GrammarVariant::Ref => 0,
+            GrammarVariant::OneOf => 1,
+            GrammarVariant::Delimited => 2,
+            _ => 3,
+        }
+    }
+
     fn frame_cache_key(
         &mut self,
         frame: &TableParseFrame,
@@ -852,7 +859,12 @@ impl Parser<'_> {
             // drift). `None` means this grammar isn't cached.
             if let Some(cache_key) = self.frame_cache_key(&frame)? {
                 frame.cache_key = Some(cache_key);
+                let variant_slot = Self::cache_variant_slot(self.grammar_ctx.variant(frame.grammar_id));
+                self.metrics.cache_gets_by_variant[variant_slot]
+                    .set(self.metrics.cache_gets_by_variant[variant_slot].get() + 1);
                 if let Some((match_result, end_pos)) = self.table_cache.get(&cache_key) {
+                    self.metrics.cache_hits_by_variant[variant_slot]
+                        .set(self.metrics.cache_hits_by_variant[variant_slot].get() + 1);
                     vdebug!(
                         "[LOOP] TableCache HIT for grammar {} at pos {} -> end_pos {} (frame_id={})",
                         frame.grammar_id,

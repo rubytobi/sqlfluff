@@ -38,13 +38,13 @@ use crate::parser::table_driven::frame::TableParseFrame;
 /// up under another, silently corrupting results).
 #[inline]
 pub(crate) fn is_frame_cacheable(variant: GrammarVariant) -> bool {
-    matches!(
-        variant,
-        GrammarVariant::Ref
-            | GrammarVariant::OneOf
-            | GrammarVariant::Delimited
-            | GrammarVariant::Bracketed
-    )
+    // Measured over the 121 TPC-H/TPC-DS fixtures (see PERF_LOG.md): Ref
+    // frames were 68% of all cache lookups at a 0.76% hit rate, and
+    // Bracketed never hit at all; OneOf and Delimited hit ~10% and their
+    // hits save whole-subtree reparses (disabling the cache outright is a
+    // 7x wall-time regression). Caching only the variants that pay their
+    // way removes ~650k lookup+insert round trips per full-suite pass.
+    matches!(variant, GrammarVariant::OneOf | GrammarVariant::Delimited)
 }
 
 /// Match-quality policy: how a grammar decides whether a new candidate match
