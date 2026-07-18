@@ -614,11 +614,14 @@ def test__rust_parser__native_ast_parity(sqlfile):
             set_native_ast(False)
 
     def build_python():
+        # The Python leg is compared strictly too (positions and exception
+        # messages included): corpus-wide byte-parity with the Python parser
+        # now holds and is deliberately guarded at this strictness.
         try:
             tree = Parser(config=config).parse(segments, fname=str(sqlfile))
-            return result_for(tree)
+            return result_for(tree, include_position=True)
         except BaseException as err:
-            return ("exc", type(err).__name__)
+            return ("exc", type(err).__name__, str(err))
 
     python_result = build_python()
     rust_default, rust_default_strict = build_rust(native=False)
@@ -627,7 +630,9 @@ def test__rust_parser__native_ast_parity(sqlfile):
     assert rust_native_strict == rust_default_strict, (
         "native-AST path diverges from convert+apply"
     )
-    assert python_result == rust_default, "RustParser diverges from Python Parser"
+    assert python_result == rust_default_strict, (
+        "RustParser diverges from Python Parser"
+    )
 
 
 @pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
@@ -1504,6 +1509,242 @@ def test__rust_codegen__dialect_lexer_patterns_hash_seed_stable():
         )
         outputs.add(proc.stdout)
     assert len(outputs) == 1, "lexer matcher patterns vary with the hash seed"
+
+
+# ---------------------------------------------------------------------------
+# Python-vs-Rust strict parity: fuzz-derived regressions (round five).
+#
+# Found by re-aiming the differential batteries at the Python-vs-Rust axis
+# with a strict comparator (trees with positions, stringify bytes - which
+# carry the user-visible UnparsableSegment "Expected:" messages - raw
+# round-trip and full exception details). ~3200 mutation/soup/char/cross-
+# dialect cases plus a 2187-fixture strict sweep, CLI byte-diff and a
+# templated battery.
+# ---------------------------------------------------------------------------
+
+
+def _compare_parser_vs_rust_stringify(sql: str, dialect: str = "ansi"):
+    """Like _compare_parser_vs_rust, but also compares stringify() bytes.
+
+    The stringify output includes UnparsableSegment "expected" messages,
+    which to_tuple() does not - several regressions below live only there.
+    """
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser import Lexer, Parser
+
+    config = FluffConfig(overrides={"dialect": dialect})
+    segments, _ = Lexer(config=config).lex(sql)
+
+    def build(use_rust: bool):
+        try:
+            parser = RustParser(config=config) if use_rust else Parser(config=config)
+            tree = parser.parse(segments, fname="t.sql")
+            if tree is None:
+                return ("none",)
+            return (
+                "tree",
+                tree.to_tuple(
+                    code_only=False,
+                    show_raw=True,
+                    include_meta=True,
+                    include_position=True,
+                ),
+                tree.stringify(),
+            )
+        except BaseException as err:
+            return (
+                "exc",
+                type(err).__name__,
+                str(err),
+                getattr(err, "line_no", None),
+                getattr(err, "line_pos", None),
+            )
+
+    return build(True), build(False)
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.parametrize(
+    "dialect,sql",
+    [
+        # The ref-combining isinstance path attached the token's
+        # instance_types to a CONTAINER class (ScriptContentSegment), which
+        # BaseSegment.__init__ rejects - RustParser crashed with TypeError
+        # while Python parsed fine.
+        ("exasol", "CREATE OR REPLACE SCRIPT aschema.hello AS\n 'HELLO'\n/\n--\n"),
+        # "Found <...>" parse-error messages: code-matched tokens displayed
+        # as RawSegment (Python: CodeSegment)...
+        ("flink", "SELECT ] FROM t"),
+        # ...and token raws were escape_debug-quoted rather than following
+        # Python's repr() quote-selection rules.
+        ("ansi", "SELECT '"),
+        # "Expected: <...>" grammar reprs: Python curtails element reprs at
+        # 40 chars and the joined list at 100; Rust rendered them in full.
+        ("databricks", "SELECT AS x"),
+        # Parser-created segments must not inherit the lexed token's
+        # trim_chars (Python's from_result_segments inherits only
+        # quoted_value/escape_replacements/casefold).
+        ("mysql", "SET @errmsg = 'x';"),
+        # Sequence error messages: Rust appended a trailing period to
+        # "Found <...>." that Python's format doesn't have.
+        ("bigquery", "SELECT STRUCT<a INT64(1)"),
+    ],
+    ids=lambda v: repr(v)[:40],
+)
+def test__rust_parser__vs_python_message_and_kwargs_parity(dialect, sql):
+    """Byte-identical trees, positions, stringify and errors across engines."""
+    rust_result, python_result = _compare_parser_vs_rust_stringify(sql, dialect)
+    assert rust_result == python_result
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+def test__rust_parser__vs_python_parser_created_segments_drop_token_trim_chars():
+    """Parser-created segments carry identical normalization kwargs.
+
+    Regression test: mysql lexes ``@errmsg`` with trim_chars=("@",) at the
+    token level; the parse-time RegexParser then creates a fresh segment.
+    Python's RawSegment.from_result_segments inherits only quoted_value /
+    escape_replacements / casefold from the source token - NOT trim_chars -
+    while Rust's segment_kwargs_from_token used to forward the token's
+    trim_chars, so Rust-parsed variable segments carried ('@',) where
+    Python-parsed ones carry None.
+    """
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser import Lexer, Parser
+
+    sql = "SET @errmsg = 'x';"
+    config = FluffConfig(overrides={"dialect": "mysql"})
+    segments, _ = Lexer(config=config).lex(sql)
+
+    def var_kwargs(use_rust):
+        parser = RustParser(config=config) if use_rust else Parser(config=config)
+        tree = parser.parse(segments, fname="t.sql")
+        return [
+            (s.raw, getattr(s, "trim_chars", None), getattr(s, "casefold", None))
+            for s in tree.recursive_crawl_all()
+            if s.raw == "@errmsg"
+        ]
+
+    py = var_kwargs(False)
+    rs = var_kwargs(True)
+    assert py and py == rs
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known gap: for depth/complexity guard errors, the RustParser "
+        "pipeline anchors the SQLParseError at the token where the limit "
+        "tripped (line/pos set), while the pure-Python parser raises from "
+        "ParseContext.deeper_match with no segment anchor, so line_no/"
+        "line_pos stay 0. Same exception type and message; only the "
+        "position attributes differ. Aligning them means threading position "
+        "info into Python's raise site (or dropping Rust's anchoring)."
+    ),
+)
+def test__rust_parser__vs_python_depth_error_position_parity():
+    """Depth-limit SQLParseError should carry identical position info."""
+    sql = "SELECT " + "CASE WHEN 1 THEN " * 40 + "0" + " END" * 40
+    rust_result, python_result = _compare_parser_vs_rust_stringify(sql, "ansi")
+    assert rust_result == python_result
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known gap: the max_parse_nodes budget is enforced twice with "
+        "different counting semantics - the Rust core counts its internal "
+        "match-tree nodes and raises before Python-side building, while the "
+        "pure-Python parser counts materialized parse nodes. For the same "
+        "SQL the minimal passing limit differs (e.g. 46 vs 50 for a simple "
+        "SELECT), so limits in that window parse under one engine and raise "
+        "SQLParseError under the other."
+    ),
+)
+def test__rust_parser__vs_python_max_parse_nodes_threshold_parity():
+    """The same max_parse_nodes limit should behave identically on both engines."""
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser import Lexer, Parser
+
+    sql = "SELECT a, b FROM t WHERE x = 1"
+
+    def outcome(use_rust, limit):
+        config = FluffConfig(overrides={"dialect": "ansi", "max_parse_nodes": limit})
+        segments, _ = Lexer(config=config).lex(sql)
+        parser = RustParser(config=config) if use_rust else Parser(config=config)
+        try:
+            parser.parse(segments, fname="t.sql")
+            return "tree"
+        except BaseException as err:
+            return type(err).__name__
+
+    # Find Python's minimal passing limit, then require Rust to agree at
+    # that limit and one below it.
+    lo, hi = 1, 4000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if outcome(False, mid) == "tree":
+            hi = mid
+        else:
+            lo = mid + 1
+    assert outcome(True, lo) == outcome(False, lo)
+    assert outcome(True, lo - 1) == outcome(False, lo - 1)
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.parametrize(
+    "dialect,sql,reason",
+    [
+        (
+            "sqlite",
+            "WITH cte AS (\n t\n)\nSELECT",
+            "Rust's unparsable 'Expected:' says 'Nothing here.' where Python "
+            "names the expected grammar element.",
+        ),
+        (
+            "materialize",
+            "COPY t FROM STDIN (FORMAT {-",
+            "A stray opening '{' crossed with ')' raises 'Found unexpected "
+            "end bracket!' in Python but Rust quietly recovers a tree.",
+        ),
+        (
+            "tsql",
+            "select CAST(0X0 uniqueidentifier);",
+            "Structural divergence: Python parses the malformed CAST content "
+            "as column_reference, Rust as function.",
+        ),
+        (
+            "materialize",
+            "(\n ) ( );\nCREATE SOURCE my_webhook_source IN CLUSTER "
+            "my_cluster FROM WEBHOOK\n BODY FORMAT JSON\n (\n (\n "
+            "my_webhook_share",
+            "The Rust core emits OVERLAPPING child matches for this input, "
+            "so the Python-side builder raises its internal ValueError "
+            "('Segment skip ahead error') instead of Python's SQLParseError.",
+        ),
+    ],
+    ids=[
+        "nothing-here-expected",
+        "curly-cross-recovery",
+        "cast-structure",
+        "overlapping-matches",
+    ],
+)
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known Python-vs-Rust engine divergences surviving the round-five "
+        "fuzz campaign (see per-case reasons in the parametrization). Each "
+        "is a distinct rust-core matching/error-recovery gap; minimized "
+        "repros are embedded so the divergence is deterministic."
+    ),
+)
+def test__rust_parser__vs_python_known_engine_divergences(dialect, sql, reason):
+    """Minimized, still-open Python-vs-Rust engine divergences."""
+    rust_result, python_result = _compare_parser_vs_rust_stringify(sql, dialect)
+    assert rust_result == python_result
 
 
 # ---------------------------------------------------------------------------

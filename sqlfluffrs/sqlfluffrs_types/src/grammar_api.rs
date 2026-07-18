@@ -48,6 +48,20 @@ impl<'a> GrammarContext<'a> {
     /// Format: "<Ref: 'RefName'>" for Ref
     /// Format: "VariantName" for others
     pub fn grammar_repr(&self, id: GrammarId) -> String {
+        // PYTHON PARITY: BaseGrammar.__repr__ curtails each element repr to 40
+        // characters and the joined element list to 100 (helpers/string.py
+        // curtail_string: `s[:n] + "..."` when longer). These reprs surface in
+        // user-visible UnparsableSegment "Expected:" messages, so the byte
+        // format must match, including the truncation.
+        fn curtail(s: String, n: usize) -> String {
+            if s.chars().count() > n {
+                let mut out: String = s.chars().take(n).collect();
+                out.push_str("...");
+                out
+            } else {
+                s
+            }
+        }
         if id == GrammarId::NONCODE {
             return "NONCODE".to_string();
         }
@@ -77,7 +91,15 @@ impl<'a> GrammarContext<'a> {
                 } else {
                     vec![self.grammar_repr(first_child)]
                 };
-                format!("<Delimited: [{}]>", child_reprs.join(", "))
+                let inner = curtail(
+                    child_reprs
+                        .into_iter()
+                        .map(|r| curtail(r, 40))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    100,
+                );
+                format!("<Delimited: [{}]>", inner)
             }
             GrammarVariant::Sequence
             | GrammarVariant::OneOf
@@ -89,9 +111,13 @@ impl<'a> GrammarContext<'a> {
                 let children: Vec<GrammarId> = self.children(id).collect();
                 let child_reprs: Vec<String> = children
                     .iter()
-                    .map(|&child_id| self.grammar_repr(child_id))
+                    .map(|&child_id| curtail(self.grammar_repr(child_id), 40))
                     .collect();
-                format!("<{}: [{}]>", variant_name, child_reprs.join(", "))
+                format!(
+                    "<{}: [{}]>",
+                    variant_name,
+                    curtail(child_reprs.join(", "), 100)
+                )
             }
             GrammarVariant::StringParser
             | GrammarVariant::TypedParser

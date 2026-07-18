@@ -27,6 +27,7 @@ from sqlfluff.core.parser.segments import (
     Dedent,
     ImplicitIndent,
     Indent,
+    RawSegment,
     TemplateSegment,
     UnparsableSegment,
 )
@@ -464,7 +465,14 @@ try:
             # Build segment_kwargs - optimize by checking first if we need any
             segment_kwargs: dict[str, Any] = {}
             if rs_match.instance_types:
-                segment_kwargs["instance_types"] = tuple(rs_match.instance_types)
+                # PYTHON PARITY: only RawSegment accepts `instance_types`.
+                # The Rust ref-combining isinstance path can attach the
+                # token's types to a match whose class is a *container*
+                # segment (e.g. exasol's ScriptContentSegment wrapping a
+                # quoted script body); Python never emits instance_types
+                # there, and BaseSegment.__init__ would reject the kwarg.
+                if matched_class is None or issubclass(matched_class, RawSegment):
+                    segment_kwargs["instance_types"] = tuple(rs_match.instance_types)
 
             # Copy over any segment_kwargs from Rust
             # (e.g., "expected" for UnparsableSegment)
