@@ -1682,6 +1682,140 @@ def test__rust_parser__vs_python_lexer_unlexable_error_message():
 
 
 @pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.parametrize(
+    "dialect,sql",
+    [
+        # Multi-marker inline comments (tuple-configured trim_start).
+        ("ansi", "-- a comment\nSELECT 1"),
+        ("mysql", "# hash comment\nSELECT 1"),
+        ("snowflake", "// slash comment\nSELECT 1"),
+        # Dialects that used to configure trim_start as a bare string
+        # (sparksql/flink `"--"`) or a parenthesised string that was meant
+        # to be a tuple (db2/exasol/postgres/tsql `("--")`).
+        ("sparksql", "-- c\nSELECT 1"),
+        ("flink", "-- c\nSELECT 1"),
+        ("db2", "-- c\nSELECT 1"),
+        ("exasol", "-- c\nSELECT 1"),
+        ("postgres", "-- c\nSELECT 1"),
+        ("tsql", "-- c\nSELECT 1"),
+        # trim_chars-carrying tokens (quoted identifiers / parameters).
+        ("bigquery", "SELECT `col`, @param FROM t"),
+        ("snowflake", "SELECT $1 FROM @stage"),
+    ],
+    ids=lambda v: repr(v)[:30],
+)
+def test__rust_lexer__vs_python_token_kwargs_parity(dialect, sql):
+    """PyRsLexer tokens carry byte-identical normalization kwargs to PyLexer's.
+
+    Regression test for two related bridging bugs:
+
+    1. RawSegment.from_rstoken passed the pyo3 getters' lists (Vec<String>)
+       straight through, so Rust-lexed segments carried ``trim_start`` /
+       ``trim_chars`` as lists where Python-lexed segments carry tuples.
+    2. Six dialects configured ``trim_start`` as a bare string - sparksql and
+       flink as ``"--"``, and db2/exasol/postgres/tsql as ``("--")`` (a
+       parenthesised string where a one-tuple ``("--",)`` was clearly
+       intended). Python happened to keep working because iterating the
+       string yields per-character markers ('-', '-'), but the Rust lexer
+       codegen faithfully ported the char-split form, so Rust-lexed comment
+       tokens diverged on every commented file in those dialects.
+    """
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser.lexer import PyLexer, PyRsLexer
+
+    config = FluffConfig(overrides={"dialect": dialect})
+    py_tokens, py_errs = PyLexer(config=config).lex(sql)
+    rs_tokens, rs_errs = PyRsLexer(config=config).lex(sql)
+
+    def fingerprint(seg):
+        return (
+            type(seg).__name__,
+            seg.raw,
+            seg.get_type(),
+            getattr(seg, "trim_start", None),
+            getattr(seg, "trim_chars", None),
+            getattr(seg, "quoted_value", None),
+        )
+
+    assert [fingerprint(s) for s in rs_tokens] == [fingerprint(s) for s in py_tokens]
+    assert [type(e).__name__ for e in rs_errs] == [type(e).__name__ for e in py_errs]
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known gap: the Rust lexer models quoted-literal escapes as a single "
+        "pair - utils/build_lexers.py takes `escape_replacements[0]` and "
+        "drops the rest, and the whole Rust pipeline (Token, RsMatchResult."
+        "escape_replacement) is singular. Flink's single_quote lexer "
+        "configures TWO replacement pairs (dialect_flink.py: "
+        '[("\'\'", "\'"), (r"\\\\\'", "\'")]), so Rust-lexed string tokens '
+        "lose the backslash-escape pair and quoted-value normalization "
+        "(e.g. rule RF06) sees different data depending on the lexer. "
+        "Fixing this means making escape replacements plural through the "
+        "Rust Token, the lexer codegen, and the match-result plumbing."
+    ),
+)
+def test__rust_lexer__vs_python_escape_replacements_parity():
+    """PyRsLexer must carry ALL configured escape_replacements pairs.
+
+    Uses flink, whose single_quote lexer configures two pairs; the corpus
+    shows the same loss on every flink fixture containing a quoted literal.
+    """
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser.lexer import PyLexer, PyRsLexer
+
+    sql = "SELECT 'esc''aped'"
+    config = FluffConfig(overrides={"dialect": "flink"})
+    py_tokens, _ = PyLexer(config=config).lex(sql)
+    rs_tokens, _ = PyRsLexer(config=config).lex(sql)
+    py_esc = [getattr(s, "escape_replacements", None) for s in py_tokens]
+    rs_esc = [getattr(s, "escape_replacements", None) for s in rs_tokens]
+    assert rs_esc == py_esc
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.parametrize(
+    "dialect,sql",
+    [
+        # ansi grammar referenced the POLICIES/FORMATS keywords without them
+        # being registered in the ansi keyword sets.
+        ("ansi", "GRANT SELECT ON ALL MASKING POLICIES IN SCHEMA s TO r"),
+        ("ansi", "GRANT SELECT ON FUTURE MASKING POLICIES IN SCHEMA s TO r"),
+        ("ansi", "GRANT SELECT ON ALL FILE FORMATS IN SCHEMA s TO r"),
+        # mysql EXCHANGE PARTITION grammar had Ref("TableReference") - a typo
+        # for TableReferenceSegment.
+        ("mysql", "ALTER TABLE t EXCHANGE PARTITION p WITH TABLE t2 WITH VALIDATION"),
+        # postgres ALTER FOREIGN TABLE had Ref("COLUMN") - a segment ref
+        # where the COLUMN keyword was intended.
+        ("postgres", "ALTER FOREIGN TABLE ft ALTER COLUMN c OPTIONS (ADD opt 'v')"),
+    ],
+    ids=lambda v: repr(v)[:45],
+)
+def test__rust_parser__vs_python_dangling_grammar_refs(dialect, sql):
+    """Dangling grammar refs: Python raised at match time, Rust went silent.
+
+    Regression test: several dialect grammars referenced names that don't
+    exist in their dialect - unregistered keywords (ansi's MASKING POLICIES /
+    FILE FORMATS grant-object types) and typo'd segment names (mysql's
+    Ref("TableReference"), postgres's Ref("COLUMN")). Python's Ref raises
+    RuntimeError the moment the branch is attempted, while the generated
+    Rust tables resolve the missing name to Empty and silently fail the
+    branch - so identical SQL crashed one engine and quietly produced an
+    unparsable tree on the other. A table-vs-grammar audit found ~600 such
+    dangling refs across 27 dialects (194 distinct names); these cases pin
+    the SQL-reachable ones that are now fixed, and both engines must agree
+    and parse cleanly.
+    """
+    rust_result, python_result = _compare_parser_vs_rust(sql, dialect=dialect)
+    assert rust_result == python_result
+    # And the branch is genuinely reachable: the statement parses cleanly.
+    assert python_result[0] == "tree"
+    assert "unparsable" not in str(python_result[1])
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
 def test__rust_parser__native_ast_profile_has_no_convert_stage():
     """With the native builder, profiling records no separate convert stage.
 

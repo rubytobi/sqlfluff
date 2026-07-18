@@ -271,7 +271,7 @@ postgres_dialect.patch_lexer_matchers(
             "inline_comment",
             r"(--)[^\n]*",
             CommentSegment,
-            segment_kwargs={"trim_start": ("--")},
+            segment_kwargs={"trim_start": ("--",)},
         ),
         # In Postgres, the only escape character is ' for single quote strings
         RegexLexer(
@@ -7197,7 +7197,7 @@ class AlterForeignTableActionSegment(AlterTableActionSegment):
             Sequence(
                 Sequence(
                     "ALTER",
-                    Ref("COLUMN", optional=True),
+                    Ref.keyword("COLUMN", optional=True),
                     Ref("ColumnReferenceSegment"),
                     optional=True,
                 ),
