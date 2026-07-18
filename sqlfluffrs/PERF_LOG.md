@@ -468,3 +468,47 @@ benchmarks sit at −42% to −46% vs where this branch started - close to the
 halving target. The dominant remaining stage is the Python-side BaseSegment
 construction (`apply`, plus the per-token segment loop), which the "next
 levers" list above still covers.
+
+## Native segment-tree build in Rust (July 2026, same branch)
+
+The stage profile above left ~33% of native-AST wall in `apply` (the
+Python walk that turns the flat match encoding into `BaseSegment`s).
+`RsParser.parse_with_native_segments` now fuses that build into the parse
+call: Rust walks its own `MatchResult` and constructs the Python segment
+tuple directly - a line-for-line port of `_apply_flat_match.build()`
+(which remains in place as the reference implementation). The flat
+pre-order encoding (~100k Python tuples per TPC-DS pass) no longer crosses
+the boundary at all.
+
+Port details that matter for parity (all verified byte-identical):
+- Zero-length matches early-return WITHOUT wrapping in their matched class
+  (mirroring build()'s early return) - the one divergence found in review.
+- Stock-`from_result_segments` classes get a direct constructor call
+  (`_BASE_FRS` identity check, cached per class name together with the
+  resolved class in a dict the Rust side populates); custom builders
+  (RawSegment re-classing, BracketedSegment) keep classmethod dispatch.
+- Parse-node accounting is returned as a count and applied via
+  `parse_context.increment_parse_nodes(n)` after the call - same totals,
+  the limit check just fires after the build instead of during it (the
+  Rust parser enforces its own node limit during the parse regardless).
+- The stage profiler splits the fused call back into rust_core/apply using
+  the build time measured on the Rust side.
+
+**Results** (same sandbox/methodology): stage `apply` on native-AST TPC-DS
+502ms → 274ms (**−45%**); benchmark totals (committed profile) native-ast
+tpcds 1322ms → 1162ms (−12%), tpch 134ms → 126ms.
+
+**Campaign totals** (final code + one `build_pgo.sh` cycle, vs the
+combined-10 baseline this branch started from):
+
+| config | baseline | final + PGO | Δ cumulative |
+|---|---|---|---|
+| rust-legacy tpch | 258.7ms | 145.7ms | **−43.7%** |
+| rust-legacy tpcds | 2952.1ms | 1577.3ms | **−46.6%** |
+| rust-native-ast tpch | 217.4ms | 110.0ms | **−49.4%** |
+| rust-native-ast tpcds | 2212.8ms | 1052.7ms | **−52.4%** |
+
+The native-AST path - the headline CodSpeed configuration - has crossed
+the halving target on TPC-DS and sits at −49% on TPC-H. Parity: byte-
+identical digests throughout; `test/core/parser` (2587) and the full
+dialect suite (9302, lexer pass) green.
