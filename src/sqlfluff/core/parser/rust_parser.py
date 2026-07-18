@@ -147,14 +147,19 @@ try:
                 "dialect_obj"
             ).get_root_segment()
 
-            # Extract indentation config and convert boolean values only
+            # Extract indentation config for Conditional grammar evaluation.
+            # PYTHON PARITY: ParseContext.from_config coerces EVERY value in
+            # this section with bool() - it does not filter by type. Config
+            # values here are not reliably bool: the ini layer coerces "1"
+            # (and values set via FluffConfig.set_value(True)) to int 1, so
+            # an isinstance(v, bool) filter silently DROPPED truthy settings
+            # like `indented_joins = 1` on the Rust side while the Python
+            # parser honoured them - flipping Conditional Indent/Dedent
+            # placement between the two engines for identical config.
             indent_config = self.config.get_section("indentation") or {}
             if indent_config:
-                # Only keep boolean config values for conditional evaluation
-                # Non-boolean values like "indent_unit": "space" are not needed
-                # for conditionals
                 indent_config = {
-                    k: v for k, v in indent_config.items() if isinstance(v, bool)
+                    k: bool(v) for k, v in indent_config.items()
                 }
 
             # Max parse depth (DoS mitigation); 0 disables the limit

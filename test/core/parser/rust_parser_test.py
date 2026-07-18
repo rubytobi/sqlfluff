@@ -1598,6 +1598,65 @@ def test__rust_parser__vs_python_message_and_kwargs_parity(dialect, sql):
 
 
 @pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+@pytest.mark.parametrize(
+    "dialect,sql",
+    [
+        # Unicode identifiers/function names in dialects whose lexers accept
+        # them. Python's RegexParser matches against raw.upper() - FULL
+        # unicode case mapping (straße -> STRASSE, ﬁ -> FI) - while the
+        # regex crates only do simple case folding, under which 'ß' never
+        # matches [A-Z]. Before the fix, Rust pre-uppercased nothing, so
+        # `SELECT straße(1)` parsed as a function under Python but a
+        # column_reference under Rust, and CREATE FUNCTION with a unicode
+        # name went unparsable on the Rust side only.
+        ("postgres", "SELECT straße(1)"),
+        ("duckdb", "SELECT straße(1)"),
+        ("postgres", "CREATE FUNCTION straße() RETURNS int AS 'x' LANGUAGE sql;"),
+        ("postgres", "SELECT ﬁx(1)"),
+    ],
+    ids=lambda v: repr(v)[:40],
+)
+def test__rust_parser__vs_python_unicode_case_folding_parity(dialect, sql):
+    """RegexParser decisions agree on unicode raws needing full case mapping."""
+    rust_result, python_result = _compare_parser_vs_rust_stringify(sql, dialect)
+    assert rust_result == python_result
+    assert python_result[0] == "tree"
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
+def test__rust_parser__vs_python_int_typed_indentation_config():
+    """Indentation config set as int 1/0 reaches the Rust parser.
+
+    Regression test: the ini config layer coerces `indented_joins = 1` (and
+    values set via FluffConfig.set_value(True)) to int 1, not bool True.
+    Python's ParseContext coerces every indentation value with bool(), but
+    RustParser.__init__ filtered the section with isinstance(v, bool) - so
+    truthy int-typed settings were silently DROPPED on the Rust side and its
+    Conditional Indent/Dedent placement diverged from Python's for identical
+    configuration. Drives the exact user-visible path: same SQL, same config,
+    both engines must emit identical meta placement.
+    """
+    from sqlfluff.core import FluffConfig
+    from sqlfluff.core.parser import Lexer, Parser
+
+    sql = "SELECT a FROM t JOIN u USING (a)"
+    config = FluffConfig(overrides={"dialect": "ansi"})
+    config.set_value(["indentation", "indented_joins"], True)
+    # The config layer stores this as int 1 - assert that stays true so this
+    # test keeps guarding the coercion path it was written for.
+    assert config.get_section("indentation")["indented_joins"] == 1
+    segments, _ = Lexer(config=config).lex(sql)
+
+    def build(cls):
+        tree = cls(config=config).parse(segments, fname="t.sql")
+        return tree.to_tuple(
+            code_only=False, show_raw=True, include_meta=True, include_position=True
+        )
+
+    assert build(RustParser) == build(Parser)
+
+
+@pytest.mark.skipif(not _HAS_RUST_PARSER, reason="Rust parser not available")
 def test__rust_parser__vs_python_parser_created_segments_drop_token_trim_chars():
     """Parser-created segments carry identical normalization kwargs.
 
