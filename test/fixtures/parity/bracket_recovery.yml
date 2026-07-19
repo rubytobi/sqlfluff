@@ -5,8 +5,6 @@
 
 partial_match_failure_keeps_children:
   sql: SELECT CASE
-  xfail:
-    python_vs_rust: 'Not yet fixed: a GREEDY_ONCE_STARTED Sequence failing partway drops the already-matched children (the SELECT keyword) instead of keeping them typed, wrapping only the unmatched tail as unparsable - the Rust side drops accumulated child_matches/insert_segments in its error MatchResult, crashing rule ST05 (#8116). Fixed by the upcoming Rust engine parity commit.'
   pins: GREEDY_ONCE_STARTED Sequence failing partway must keep the already-matched
     children typed (the SELECT keyword), wrapping only the unmatched tail as unparsable
     - the Rust side used to drop accumulated child_matches/insert_segments in its

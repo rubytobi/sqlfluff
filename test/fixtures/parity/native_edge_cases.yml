@@ -195,8 +195,6 @@ bigquery_typed_struct:
 bigquery_typed_struct_unclosed:
   sql: SELECT STRUCT<a INT64(1)
   dialect: bigquery
-  xfail:
-    python_vs_rust: 'Not yet fixed: native-vs-legacy build-path divergence on an unclosed bigquery typed STRUCT literal. Fixed by the upcoming Rust engine parity commit.'
   pins: 'Native-vs-legacy build-path edge battery: typed struct with unclosed angle
     bracket.'
 snowflake_stage_and_positional:
@@ -237,8 +235,6 @@ multi_statement_middle_partial:
     SELECT CASE;
 
     SELECT 2'
-  xfail:
-    python_vs_rust: 'Not yet fixed: native-vs-legacy build-path divergence on a partial statement in the middle of a multi-statement file. Fixed by the upcoming Rust engine parity commit.'
   pins: 'Native-vs-legacy build-path edge battery: partially-matching middle statement.'
 tsql_multi_batch_bad_middle:
   sql: 'SELECT 1
@@ -255,8 +251,6 @@ tsql_multi_batch_bad_middle:
 bigquery_multi_statement_bad_middle:
   sql: SELECT 1; SELECT STRUCT<a INT64(1); SELECT 2;
   dialect: bigquery
-  xfail:
-    python_vs_rust: 'Not yet fixed: native-vs-legacy build-path divergence on a multi-statement bigquery file with a bad middle statement. Fixed by the upcoming Rust engine parity commit.'
   pins: 'Native-vs-legacy build-path edge battery: unclosed struct in middle statement.'
 snowflake_multi_statement_stray_exclude_bracket:
   sql: SELECT 1; SELECT 1 -} FROM t; SELECT 2;

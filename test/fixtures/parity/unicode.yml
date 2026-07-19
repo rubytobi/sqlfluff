@@ -7,8 +7,6 @@ postgres_eszett_function_name:
   sql: SELECT straße(1)
   dialect: postgres
   expect: tree
-  xfail:
-    python_vs_rust: 'Not yet fixed: Rust''s regex crates only do simple (not full) unicode case folding, so the eszett never matches [A-Z] under case-insensitive matching - this parses as function under Python but column_reference under Rust. Fixed by the upcoming Rust engine parity commit.'
   pins: Python's RegexParser matches against raw.upper() - FULL unicode case mapping
     (strasse-with-eszett -> STRASSE, fi-ligature -> FI) - while the Rust regex crates
     only do simple case folding, under which the eszett never matches [A-Z]. Rust
@@ -19,8 +17,6 @@ duckdb_eszett_function_name:
   sql: SELECT straße(1)
   dialect: duckdb
   expect: tree
-  xfail:
-    python_vs_rust: 'Not yet fixed: same eszett case-folding divergence as the postgres case, on duckdb. Fixed by the upcoming Rust engine parity commit.'
   pins: Python's RegexParser matches against raw.upper() - FULL unicode case mapping
     (strasse-with-eszett -> STRASSE, fi-ligature -> FI) - while the Rust regex crates
     only do simple case folding, under which the eszett never matches [A-Z]. Rust
@@ -30,8 +26,6 @@ postgres_create_function_unicode_name:
   sql: CREATE FUNCTION straße() RETURNS int AS 'x' LANGUAGE sql;
   dialect: postgres
   expect: tree
-  xfail:
-    python_vs_rust: 'Not yet fixed: CREATE FUNCTION with a unicode (eszett) name goes unparsable on the Rust side only, due to simple-vs-full unicode case folding. Fixed by the upcoming Rust engine parity commit.'
   pins: Python's RegexParser matches against raw.upper() - FULL unicode case mapping
     (strasse-with-eszett -> STRASSE, fi-ligature -> FI) - while the Rust regex crates
     only do simple case folding, under which the eszett never matches [A-Z]. Rust
@@ -41,8 +35,6 @@ postgres_fi_ligature_function_name:
   sql: SELECT ﬁx(1)
   dialect: postgres
   expect: tree
-  xfail:
-    python_vs_rust: 'Not yet fixed: same simple-vs-full unicode case-folding divergence, triggered by the fi-ligature character. Fixed by the upcoming Rust engine parity commit.'
   pins: Python's RegexParser matches against raw.upper() - FULL unicode case mapping
     (strasse-with-eszett -> STRASSE, fi-ligature -> FI) - while the Rust regex crates
     only do simple case folding, under which the eszett never matches [A-Z]. Rust

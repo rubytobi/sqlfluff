@@ -71,7 +71,13 @@ impl Token {
     }
 
     pub fn code_token(raw: String, pos_marker: PositionMarker, config: TokenConfig) -> Self {
-        Self::raw_token(raw, pos_marker, config)
+        let mut token = Self::raw_token(raw, pos_marker, config);
+        // PYTHON PARITY: code-matched tokens are CodeSegment on the Python
+        // side; class_name feeds the token Display used in user-visible
+        // "Found <...>" parse-error messages (it is not used for class
+        // selection - that keys on token_type).
+        token.class_name = Cow::Borrowed("CodeSegment");
+        token
     }
 
     pub fn symbol_token(raw: String, pos_marker: PositionMarker, config: TokenConfig) -> Self {

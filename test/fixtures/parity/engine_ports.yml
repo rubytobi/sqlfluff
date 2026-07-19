@@ -49,8 +49,6 @@ bigquery_exception_block_system_variable:
     \ = FORMAT(\"Something went wrong: %s\", @@error.message);\nEND;"
   dialect: bigquery
   expect: clean_tree
-  xfail:
-    python_vs_rust: 'Not yet fixed: the Rust engine diverges from Python parsing a BigQuery EXCEPTION block that references the @@error.message system variable. Fixed by the upcoming Rust engine parity commit.'
   pins: 'Ported from sqlfluffrs/tests (ad-hoc Rust integration test): EXCEPTION block
     with @@error.message system variable (test_handle_exception.rs).'
 ansi_create_sequence_options:

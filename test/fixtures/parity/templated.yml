@@ -81,8 +81,6 @@ raw_block_survives:
   sql: '{% raw %}SELECT {{ not_a_var }}{% endraw %} FROM t'
   templater: jinja
   context: *id001
-  xfail:
-    python_vs_rust: 'Not yet fixed: Jinja {% raw %} block template syntax surviving into SQL diverges between the native and legacy build paths. Fixed by the upcoming Rust engine parity commit.'
   pins: 'Jinja-templated parse (TemplateSegment placeholders, Linter path): raw block:
     template syntax surviving into SQL.'
 escaped_block_marker:
