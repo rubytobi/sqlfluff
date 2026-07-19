@@ -9,8 +9,6 @@ ansi_inline_comment_trim_start:
   sql: '-- a comment
 
     SELECT 1'
-  xfail:
-    lexer: 'Not yet fixed: pyo3 getters return lists for trim_start/trim_chars where Python carries tuples, so RawSegment construction disagrees between engines. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -20,8 +18,6 @@ mysql_hash_comment:
 
     SELECT 1'
   dialect: mysql
-  xfail:
-    lexer: 'Not yet fixed: same trim_start list-vs-tuple bridging gap, on mysql''s multi-marker inline comment. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -31,8 +27,6 @@ snowflake_slash_comment:
 
     SELECT 1'
   dialect: snowflake
-  xfail:
-    lexer: 'Not yet fixed: same trim_start list-vs-tuple bridging gap, on snowflake''s multi-marker inline comment. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -42,8 +36,6 @@ sparksql_bare_string_trim_start:
 
     SELECT 1'
   dialect: sparksql
-  xfail:
-    lexer: 'Not yet fixed: sparksql configures trim_start as a bare string ''--'', which the Rust codegen faithfully char-splits instead of treating as one marker. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -53,8 +45,6 @@ flink_bare_string_trim_start:
 
     SELECT 1'
   dialect: flink
-  xfail:
-    lexer: 'Not yet fixed: flink configures trim_start as a bare string ''--'', which the Rust codegen faithfully char-splits instead of treating as one marker. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -64,8 +54,6 @@ db2_parenthesised_trim_start:
 
     SELECT 1'
   dialect: db2
-  xfail:
-    lexer: 'Not yet fixed: db2 configures trim_start as a parenthesised string (''--''), which the Rust codegen faithfully char-splits instead of treating as one marker. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -75,8 +63,6 @@ exasol_parenthesised_trim_start:
 
     SELECT 1'
   dialect: exasol
-  xfail:
-    lexer: 'Not yet fixed: exasol configures trim_start as a parenthesised string (''--''), which the Rust codegen faithfully char-splits instead of treating as one marker. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -86,8 +72,6 @@ postgres_parenthesised_trim_start:
 
     SELECT 1'
   dialect: postgres
-  xfail:
-    lexer: 'Not yet fixed: postgres configures trim_start as a parenthesised string (''--''), which the Rust codegen faithfully char-splits instead of treating as one marker. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -97,8 +81,6 @@ tsql_parenthesised_trim_start:
 
     SELECT 1'
   dialect: tsql
-  xfail:
-    lexer: 'Not yet fixed: tsql configures trim_start as a parenthesised string (''--''), which the Rust codegen faithfully char-splits instead of treating as one marker. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -106,8 +88,6 @@ tsql_parenthesised_trim_start:
 bigquery_quoted_identifier_and_param:
   sql: SELECT `col`, @param FROM t
   dialect: bigquery
-  xfail:
-    lexer: 'Not yet fixed: trim_chars-carrying tokens bridge as lists instead of tuples between engines. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Token normalization kwargs bridging: pyo3 getters returned lists where Python
     carries tuples, and six dialects configured trim_start as a bare string (sparksql/flink
     ''--'') or parenthesised string (db2/exasol/postgres/tsql (''--'')) which the
@@ -122,8 +102,6 @@ snowflake_positional_and_stage:
 bigquery_double_at_system_variable:
   sql: '@@error.message'
   dialect: bigquery
-  xfail:
-    lexer: 'Not yet fixed: ''@@'' system variables do not yet lex as a single token stream identical to Python''s. Fixed by the upcoming dialect grammar-fixes commit.'
   pins: 'Ported from sqlfluffrs/tests/test_double_at.rs: ''@@'' system variables
     lex as a single token stream identical to Python''s.'
 unlexable_error_message_format:

@@ -261,10 +261,20 @@ tsql_dialect.insert_lexer_matchers(
         RegexLexer(
             "numeric_literal",
             (
+                # NOTE: The currency symbols are sorted so the built pattern is
+                # byte-stable across processes. `sets()` is an unordered set and
+                # its iteration order depends on the interpreter's hash seed;
+                # inside a regex character class the order is semantically
+                # irrelevant, but the Rust dialect codegen (utils/rustify.py)
+                # snapshots this pattern into a generated file, and an unstable
+                # ordering makes that file unreproducible (the freshness check
+                # then flags a mismatch on every run).
                 r"([xX]'([\da-fA-F][\da-fA-F])+'"
                 r"|0[xX][\da-fA-F]*"
-                r"|[+-]*[" + "".join(tsql_dialect.sets("currency_symbols")) + r"]"
-                r"[" + "".join(tsql_dialect.sets("currency_symbols")) + r"+-]*"
+                r"|[+-]*["
+                + "".join(sorted(tsql_dialect.sets("currency_symbols")))
+                + r"]"
+                r"[" + "".join(sorted(tsql_dialect.sets("currency_symbols"))) + r"+-]*"
                 r"(?>\d+\.\d+|\d+\.(?![\.\w])|\.\d+|\d+))"
             ),
             LiteralSegment,
@@ -296,7 +306,7 @@ tsql_dialect.patch_lexer_matchers(
             "inline_comment",
             r"(--)[^\n]*",
             CommentSegment,
-            segment_kwargs={"trim_start": ("--")},
+            segment_kwargs={"trim_start": ("--",)},
         ),
         # Patching block comments to account for nested blocks.
         # N.B. this syntax is only possible via the non-standard-library
@@ -9868,3 +9878,62 @@ class ModulusAssignmentSegment(CompositeBinaryOperatorSegment):
     """
 
     match_grammar = Sequence(Ref("ModuloComparisonSegment"), Ref("RawEqualsSegment"))
+
+
+# Keywords referenced by this dialect's grammar (via bare strings or
+# Ref.keyword) that were never registered in its keyword sets. Python's
+# Ref resolution raises RuntimeError the moment such a branch is tried
+# (and the generated Rust tables silently fail it), so any statement
+# routing tokens into one of these grammar branches crashed the parser.
+tsql_dialect.sets("unreserved_keywords").update(
+    [
+        "ACCOUNT",
+        "APPEND",
+        "ASSIGNMENT",
+        "AUTO_INCREMENT",
+        "BASE64",
+        "COMMENT",
+        "EXECUTION",
+        "FORMATS",
+        "FUNCTIONS",
+        "FUTURE",
+        "GRANTS",
+        "IMPORTED",
+        "INSTANCE",
+        "MANAGE",
+        "MARK",
+        "MASKING",
+        "MATERIALIZED",
+        "MONITOR",
+        "NOCACHE",
+        "NOCYCLE",
+        "NOORDER",
+        "OBJECT_ID",
+        "OPERATE",
+        "OPTIONS",
+        "OVERLAPS",
+        "PIPE",
+        "POLICIES",
+        "PROCEDURES",
+        "QUALIFY",
+        "REFERENCE_USAGE",
+        "RESOURCE",
+        "ROUTINES",
+        "SCHEMAS",
+        "SEPARATOR",
+        "SEQUENCES",
+        "SHARE",
+        "STAGE",
+        "STAGES",
+        "STREAM",
+        "STREAMS",
+        "TABLES",
+        "TABLESPACE",
+        "TASK",
+        "TASKS",
+        "TEMP",
+        "TRANSIENT",
+        "USE_ANY_ROLE",
+        "VIEWS",
+    ]
+)
