@@ -347,7 +347,7 @@ impl PyMatchResult {
         self.0
             .matched_class
             .as_ref()
-            .and_then(|s| s.segment_kwargs.escape_replacements.clone())
+            .and_then(|s| s.segment_kwargs.escape_replacements.as_deref().cloned())
     }
 
     /// Get insert_segments (meta segments like Indent/Dedent to insert)

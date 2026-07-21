@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::regex::RegexModeGroup;
 
@@ -12,7 +12,7 @@ use super::{CaseFold, Token};
 #[derive(Debug, Clone)]
 struct NormalizeSpec {
     quoted_value: Option<(String, RegexModeGroup)>,
-    escape_replacements: Option<Vec<(String, String)>>,
+    escape_replacements: Option<Arc<Vec<(String, String)>>>,
     casefold: CaseFold,
     /// Config-dependent normalized form, computed at most once. Empty until the
     /// first `normalized()` call (typically only during linting).
@@ -36,7 +36,7 @@ impl RawString {
     pub fn new(
         raw: String,
         quoted_value: Option<(String, RegexModeGroup)>,
-        escape_replacements: Option<Vec<(String, String)>>,
+        escape_replacements: Option<Arc<Vec<(String, String)>>>,
         casefold: CaseFold,
     ) -> Self {
         // Only allocate an uppercase copy when it actually differs from `raw`.
@@ -82,7 +82,16 @@ impl RawString {
     pub fn escape_replacements(&self) -> Option<&Vec<(String, String)>> {
         self.spec
             .as_ref()
-            .and_then(|s| s.escape_replacements.as_ref())
+            .and_then(|s| s.escape_replacements.as_deref())
+    }
+
+    /// Get a cheap (refcount-bumping) clone of the shared escape_replacements
+    /// spec, for handing the pairs to a freshly-built token/segment without a
+    /// deep copy.
+    pub fn escape_replacements_arc(&self) -> Option<Arc<Vec<(String, String)>>> {
+        self.spec
+            .as_ref()
+            .and_then(|s| s.escape_replacements.clone())
     }
 
     /// Get the casefold mode (`CaseFold::None` when there is no spec).
@@ -99,7 +108,7 @@ impl RawString {
                 Token::normalize(
                     &self.raw,
                     spec.quoted_value.as_ref(),
-                    spec.escape_replacements.as_ref(),
+                    spec.escape_replacements.as_deref(),
                 )
             }),
         }

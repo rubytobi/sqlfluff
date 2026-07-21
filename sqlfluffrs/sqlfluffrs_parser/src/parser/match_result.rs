@@ -38,7 +38,7 @@ pub struct SegmentKwargs {
     pub trim_chars: Option<Vec<String>>,
     pub casefold: CaseFold,
     pub quoted_value: Option<(String, RegexModeGroup)>,
-    pub escape_replacements: Option<Vec<(String, String)>>,
+    pub escape_replacements: Option<Arc<Vec<(String, String)>>>,
     pub parse_error: Option<(String, usize)>,
 }
 
@@ -746,7 +746,7 @@ pub fn segment_kwargs_from_token(
         // into it; grammar-configured trim_chars are applied by the parser
         // handlers on top of these kwargs where present.
         trim_chars: None,
-        escape_replacements: tok.escape_replacements().cloned(),
+        escape_replacements: tok.escape_replacements_arc(),
         quoted_value: tok.quoted_value().cloned(),
         ..Default::default()
     }

@@ -141,6 +141,12 @@ impl Token {
         self.raw.escape_replacements()
     }
 
+    /// Cheaply-cloneable (`Arc`) handle to the escape_replacements patterns,
+    /// for carrying them into a segment/match without deep-copying the pairs.
+    pub fn escape_replacements_arc(&self) -> Option<std::sync::Arc<Vec<(String, String)>>> {
+        self.raw.escape_replacements_arc()
+    }
+
     /// Get the casefold mode for this token (`CaseFold::None` if unset)
     pub fn casefold(&self) -> CaseFold {
         self.raw.casefold()
@@ -349,7 +355,7 @@ impl Token {
             raw: RawString::new(
                 new_raw,
                 self.raw.quoted_value().cloned(),
-                self.raw.escape_replacements().cloned(),
+                self.raw.escape_replacements_arc(),
                 self.raw.casefold(),
             ),
             source_fixes: Some(source_fixes.unwrap_or(self.source_fixes())),

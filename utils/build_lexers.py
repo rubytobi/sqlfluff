@@ -224,7 +224,9 @@ def _as_rust_lexer_matcher(lexer_matcher: LexerType, dialect: str, is_subdivide=
             if replacement == r'r#"\[{2}([^[\\]|\\.)*\]{2}"#':
                 replacement = r'r#"\[{2}([^\[\\]|\\.)*\]{2}"#'
             rust_pairs.append(f"({pattern}.to_string(), {replacement}.to_string())")
-        escape_replacements_rust = "Some(vec![" + ", ".join(rust_pairs) + "])"
+        escape_replacements_rust = (
+            "Some(std::sync::Arc::new(vec![" + ", ".join(rust_pairs) + "]))"
+        )
     else:
         escape_replacements_rust = None
 
