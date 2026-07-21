@@ -259,11 +259,17 @@ impl Parser<'_> {
                             actual_close,
                             expected_open,
                         } => {
+                            // `expected_open` is always the raw of a token that
+                            // matched a registered opener in
+                            // find_mismatched_closing_bracket, so this lookup
+                            // cannot miss; fall back to the opener text rather
+                            // than panicking (AGENTS.md: no `.expect()` in
+                            // production) if that invariant ever changes.
                             let expected_close = bracket_pairs
                                 .iter()
                                 .find(|(open, _, _, _, _)| *open == expected_open)
                                 .map(|(_, close, _, _, _)| *close)
-                                .expect("expected_open is always a registered bracket opener");
+                                .unwrap_or(expected_open.as_str());
                             vdebug!(
                                 "[GREEDY_MATCH_TABLE] greedy_match: mismatched closing bracket '{}' at {} for opening bracket at {} (expected '{}')",
                                 actual_close, mismatch_idx, i, expected_close
