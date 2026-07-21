@@ -68,9 +68,16 @@ impl<'a> GrammarContext<'a> {
         let variant = self.variant(id);
         match variant {
             GrammarVariant::Ref => {
-                // For Ref, format as <Ref: 'RefName'>
+                // PYTHON PARITY: Ref.__repr__ (grammar/base.py) is
+                // `"<Ref: {}{}>".format(repr(self._ref), " [opt]" if
+                // self.is_optional() else "")`, so an optional Ref carries a
+                // trailing " [opt]". These reprs surface in "Expected:"
+                // unparsable messages and feed the 40/100-char curtailment, so
+                // the marker must be present (and only on Ref - container
+                // __repr__s do not append it).
                 let name = self.ref_name(id);
-                format!("<Ref: '{}'>", name)
+                let opt = if self.is_optional(id) { " [opt]" } else { "" };
+                format!("<Ref: '{}'{}>", name, opt)
             }
             GrammarVariant::Delimited => {
                 // For Delimited, Python only shows the element children (child 0), not the delimiter (child 1)
