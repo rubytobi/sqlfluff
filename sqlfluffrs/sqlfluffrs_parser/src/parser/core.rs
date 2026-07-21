@@ -1742,6 +1742,25 @@ impl<'a> Parser<'a> {
                     if nested_match {
                         inner_child_matches.push(Arc::new(nested_bracket));
                     }
+                } else if inner_raw == ")" || inner_raw == "]" || inner_raw == "}" {
+                    // PYTHON PARITY: a closing bracket of a *different* type than
+                    // the one we opened is a crossed bracket. Our own
+                    // `close_bracket` is handled above and same-type nested
+                    // openers are recursed (consuming their own closer), so
+                    // reaching here means a wrong-type ASCII closer. Python's
+                    // `resolve_bracket` (match_algorithms.py) raises rather than
+                    // swallowing it as content, so mirror that exactly instead
+                    // of bumping past it. (Scoped to the universal ASCII closers
+                    // so dialect-specific brackets like snowflake's `-}` keep
+                    // their current handling.)
+                    return Err(ParseError::with_context(
+                        format!(
+                            "Found unexpected end bracket!, was expecting <StringParser: '{}'>, but got <StringParser: '{}'>",
+                            close_bracket, inner_raw
+                        ),
+                        Some(self.pos),
+                        None,
+                    ));
                 } else {
                     // Regular token - just bump
                     self.bump();

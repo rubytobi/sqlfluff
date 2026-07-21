@@ -4,14 +4,6 @@
 anything_crossed_ascii_bracket_raises:
   sql: CREATE TABLE t (col VARCHAR(x ( y ] z )))
   expect: error
-  xfail:
-    python_vs_rust: "match_bracket_recursively (the Anything-grammar bracket
-      path, core.rs) only breaks on its own close bracket and recurses into
-      '('/'['/'{'; a closing bracket of a *different* type (here ']' while
-      scanning for ')') falls through to 'just bump' and is swallowed as
-      content, so Rust returns a tree where Python's resolve_bracket raises
-      SQLParseError \"Found unexpected end bracket!, was expecting
-      <StringParser: ')'>, but got <StringParser: ']'>\"."
   pins: A wrong-type ASCII closing bracket crossed inside an Anything() region
     must raise the same "Found unexpected end bracket!" SQLParseError Python's
     resolve_bracket raises, not be swallowed as raw content.
