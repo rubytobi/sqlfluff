@@ -511,15 +511,41 @@ impl Parser<'_> {
                                         .get(check_pos)
                                         .map(|t| format!("{}", t))
                                         .unwrap_or_else(|| "end of input".to_string());
-                                    if child_matches.len() == *content_start_len {
+                                    // PYTHON PARITY: Python's Sequence.match keys
+                                    // "to start sequence" vs "after X" on whether
+                                    // any token was consumed (matched_idx ==
+                                    // start_idx), not on a child *count* - an
+                                    // insert-only match (zero-length Indent/
+                                    // Conditional) bumps the count but not the
+                                    // position. `content_start` is where content
+                                    // began (end of the opening bracket);
+                                    // `last_matched_end` is the furthest content
+                                    // match so far (Python's matched_idx).
+                                    let content_start = child_matches
+                                        .get(content_start_len.saturating_sub(1))
+                                        .map(|m| m.matched_slice.end)
+                                        .unwrap_or(check_pos);
+                                    let last_matched_end = child_matches
+                                        .iter()
+                                        .map(|m| m.matched_slice.end)
+                                        .max()
+                                        .unwrap_or(content_start);
+                                    if last_matched_end <= content_start {
                                         format!(
                                             "{} to start sequence. Found {}",
                                             element_desc, error_token
                                         )
                                     } else {
+                                        // The "after X" token is the last
+                                        // *matched* token (Python's
+                                        // segments[matched_idx - 1]), not
+                                        // tokens[check_pos - 1]: check_pos was
+                                        // skipped forward over any gap and would
+                                        // otherwise name the intervening
+                                        // whitespace.
                                         let last_matched_token = self
                                             .tokens
-                                            .get(check_pos.saturating_sub(1))
+                                            .get(last_matched_end.saturating_sub(1))
                                             .map(|t| format!("{}", t))
                                             .unwrap_or_else(|| "start of input".to_string());
                                         format!(
