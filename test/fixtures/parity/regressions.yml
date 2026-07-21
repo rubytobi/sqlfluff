@@ -18,6 +18,12 @@ bracketed_required_content_fails_at_close_bracket:
   pins: A STRICT Bracketed must fail (return empty) when a required content
     element fails, even when that failure lands exactly on the closing bracket,
     matching Python's Sequence.match rather than fabricating a partial match.
+    KNOWN DIVERGENCE (pre-existing, kept as a strict xfail). A blanket "required
+    element failed -> return empty" in handle_bracketed_content_result regresses
+    valid table-valued-function parsing across tsql/clickhouse/doris (e.g.
+    `USING dbo.SomeFunction(...)` in a MERGE flips from table_reference to
+    function), so a correct fix needs to distinguish this partial-at-close case
+    from those without a broad STRICT change - left for a targeted follow-up.
 bracketed_optional_content_failure_nothing_here:
   sql: SELECT SUM(a) OVER (1 2 3) FROM t
   expect: tree
