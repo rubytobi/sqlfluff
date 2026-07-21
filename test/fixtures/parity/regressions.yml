@@ -1,6 +1,23 @@
 # Parity test cases - data for test/core/parser/parity/cases_test.py.
 # See test/fixtures/parity/README.md for the schema and strictness contract.
 
+bracketed_required_content_fails_at_close_bracket:
+  sql: select CAST(5);
+  dialect: tsql
+  expect: tree
+  xfail:
+    python_vs_rust: "A STRICT Bracketed whose required content element fails
+      exactly at the closing bracket (no trailing gap) still succeeds on the
+      Rust side with partial content. CastFunctionContents is
+      Bracketed(Expression, \"AS\", Datatype): on CAST(5) Expression matches
+      '5', the required \"AS\" fails at ')', and bracketed.rs - because check_pos
+      equals the closing-bracket position - skips the content-failure handling
+      and matches the close bracket anyway, fabricating a function node with
+      just the expression. Python's STRICT Sequence rejects the CAST and falls
+      back to a column_reference with the rest unparsable."
+  pins: A STRICT Bracketed must fail (return empty) when a required content
+    element fails, even when that failure lands exactly on the closing bracket,
+    matching Python's Sequence.match rather than fabricating a partial match.
 bracketed_optional_content_failure_nothing_here:
   sql: SELECT SUM(a) OVER (1 2 3) FROM t
   expect: tree
