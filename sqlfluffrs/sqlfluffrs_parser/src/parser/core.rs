@@ -1216,8 +1216,15 @@ impl<'a> Parser<'a> {
                 // differently. Uppercase the comparison text exactly like
                 // Python does; Rust's str::to_uppercase applies the same
                 // unicode mappings.
+                // Use the token's cached uppercase form (RawString precomputes
+                // raw_upper at construction and returns the original &str with
+                // zero allocation when it is already uppercase) rather than
+                // recomputing to_uppercase() on every - frequently discarded,
+                // backtracked - RegexParser match attempt. raw_upper() applies
+                // the same full-unicode str::to_uppercase mapping Python's
+                // str.upper() does, so behaviour is identical.
                 let raw = if case_insensitive {
-                    std::borrow::Cow::Owned(tok.raw().to_uppercase())
+                    std::borrow::Cow::Borrowed(tok.raw_upper())
                 } else {
                     std::borrow::Cow::Borrowed(tok.raw())
                 };
