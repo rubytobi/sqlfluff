@@ -549,11 +549,17 @@ impl Parser<'_> {
                             let specific_message = if current_required_failed {
                                 content_ids.get(*content_idx).map(|&gid| {
                                     let element_desc = self.grammar_ctx.grammar_repr(gid);
-                                    let error_token = self
-                                        .tokens
-                                        .get(check_pos)
-                                        .map(|t| format!("{}", t))
-                                        .unwrap_or_else(|| "end of input".to_string());
+                                    // The found-token fallback string differs by
+                                    // branch, exactly as sequence.rs does it: the
+                                    // "to start sequence" branch falls back to
+                                    // "start of input" (nothing consumed yet), the
+                                    // "after X" branch to "end of input".
+                                    let found_token = |fallback: &str| {
+                                        self.tokens
+                                            .get(check_pos)
+                                            .map(|t| format!("{}", t))
+                                            .unwrap_or_else(|| fallback.to_string())
+                                    };
                                     // PYTHON PARITY: Python's Sequence.match keys
                                     // "to start sequence" vs "after X" on whether
                                     // any token was consumed (matched_idx ==
@@ -576,7 +582,8 @@ impl Parser<'_> {
                                     if last_matched_end <= content_start {
                                         format!(
                                             "{} to start sequence. Found {}",
-                                            element_desc, error_token
+                                            element_desc,
+                                            found_token("start of input")
                                         )
                                     } else {
                                         // The "after X" token is the last
@@ -593,7 +600,9 @@ impl Parser<'_> {
                                             .unwrap_or_else(|| "start of input".to_string());
                                         format!(
                                             "{} after {}. Found {}",
-                                            element_desc, last_matched_token, error_token
+                                            element_desc,
+                                            last_matched_token,
+                                            found_token("end of input")
                                         )
                                     }
                                 })
