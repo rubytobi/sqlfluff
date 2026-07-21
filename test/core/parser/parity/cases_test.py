@@ -44,9 +44,10 @@ def test__parity__parser_case_reference_expectations(case):
 def test__parity__parser_case(case, leg):
     """Confirm both engines of the leg produce identical parse results."""
     sql = resolve_case_sql(case)
-    config = build_config(case.get("dialect", "ansi"), case.get("configs"))
 
     if case.get("templater"):
+        # Templated cases go through linted_parse_capture, which builds its own
+        # config; don't build one here (it would be discarded).
         left_engine, right_engine = PARSER_LEGS[leg]
         left = linted_parse_capture(
             left_engine,
@@ -67,6 +68,7 @@ def test__parity__parser_case(case, leg):
 
     from sqlfluff.core.parser import Lexer
 
+    config = build_config(case.get("dialect", "ansi"), case.get("configs"))
     # Both engines parse the SAME lexed segments: this isolates parser
     # parity from lexer parity (which has its own leg).
     segments, _ = Lexer(config=config).lex(sql)

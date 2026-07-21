@@ -71,9 +71,9 @@ def _dialect_param(label):
             marks=pytest.mark.xfail(
                 strict=True,
                 reason=(
-                    "Known dangling grammar ref; see test/fixtures/parity/"
-                    "regressions.yml. Fixed by the upcoming dialect "
-                    "grammar-fixes commit."
+                    "Known dangling grammar ref, temporarily exempted; pin an "
+                    "SQL-reachable repro in test/fixtures/parity/regressions.yml "
+                    "and remove this entry once the ref resolves."
                 ),
             ),
         )

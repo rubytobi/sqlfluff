@@ -29,6 +29,7 @@ postgres_alter_foreign_table_column_keyword:
 parser_created_segments_drop_token_trim_chars:
   sql: SET @errmsg = 'x';
   dialect: mysql
+  expect: quoted_kwargs
   pins: Parser-created segments inherit only quoted_value/escape_replacements/casefold from
     the lexed token - NOT trim_chars - matching RawSegment.from_result_segments; Rust forwards
     the token's trim_chars ('@',).
