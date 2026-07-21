@@ -384,8 +384,12 @@ def raw_match_violations(sql, dialect):
     tokens = parser._extract_tokens_from_segments(segments[start:end])
     try:
         rs_match = parser._rs_parser.parse_match_result_from_tokens(tokens)
-    except BaseException:
+    except Exception:
         # Raising a parse error is fine; we only audit *returned* results.
+        # Deliberately NOT `except BaseException`: a rust-core panic surfaces
+        # as pyo3's PanicException (a BaseException, not an Exception) and is
+        # exactly the failure this leg exists to surface, so it must propagate
+        # and fail the test rather than be reported as zero violations.
         return []
     return list(_match_result_violations(rs_match, len(tokens)))
 
