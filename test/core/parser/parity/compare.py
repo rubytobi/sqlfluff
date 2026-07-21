@@ -37,6 +37,7 @@ The engine legs compared:
 Python-vs-native parity follows transitively from the two parser legs.
 """
 
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -73,15 +74,32 @@ def _normalize_kwarg(value):
     return getattr(value, "__qualname__", value) if callable(value) else value
 
 
-def _segment_kwargs_fingerprint(tree):
-    """Collect the normalization kwargs carried by each segment that has any.
+def _tree_fingerprints(tree):
+    """Compute the three re-walk fingerprints of a tree in a single pass.
 
-    Rules like RF06 use these kwargs (e.g. for quote normalization). They stay
-    hidden from ``to_tuple()`` and ``stringify()``, yet an engine difference
-    here still shows up through rule behaviour, so this capture includes
-    them too.
+    Captured per tree, and each of these would otherwise re-crawl the whole
+    thing (``recursive_crawl_all`` twice plus a ``recursive_crawl`` for the
+    unparsable check). Folding them into one walk keeps the captures identical
+    while paying for the traversal once:
+
+    * ``segment_kwargs`` - the normalization kwargs carried by each segment
+      that has any. Rules like RF06 use these (e.g. for quote normalization);
+      they stay hidden from ``to_tuple()`` and ``stringify()``, yet an engine
+      difference here still shows up through rule behaviour.
+    * ``has_unparsable`` - whether any ``UnparsableSegment`` is present
+      (``is_type("unparsable")`` over the full crawl is equivalent to
+      ``any(recursive_crawl("unparsable"))``: both consider self and all
+      descendants).
+    * ``class_types`` - the full ``class_types`` set of every leaf segment.
+      ``to_tuple()``/``stringify()`` only record ``get_type()`` (the primary
+      type); a bare-class ``Ref`` wrapping a matched token in an ANCESTOR
+      class can produce the right primary type via ``instance_types`` while
+      still losing class-level types from the token's own lineage - invisible
+      to a ``to_tuple()``/``stringify()`` comparison alone (#8138).
     """
-    fingerprint = []
+    segment_kwargs = []
+    class_types = []
+    has_unparsable = False
     for seg in tree.recursive_crawl_all():
         kwargs = tuple(
             _normalize_kwarg(getattr(seg, attr, None))
@@ -93,27 +111,12 @@ def _segment_kwargs_fingerprint(tree):
             )
         )
         if any(value is not None for value in kwargs):
-            fingerprint.append((seg.raw, *kwargs))
-    return fingerprint
-
-
-def _class_types_fingerprint(tree):
-    """Full ``class_types`` set of every leaf segment.
-
-    ``to_tuple()`` and ``stringify()`` only record ``get_type()`` - a
-    segment's *primary* type. A bare-class ``Ref`` that wraps a matched
-    token in an ANCESTOR class (e.g. ``Ref("CodeSegment")`` over a
-    ``LiteralSegment`` value) can produce the right primary type via
-    ``instance_types`` while still losing class-level types from the
-    token's own lineage (e.g. ``literal``) that only appear in the full
-    ``class_types`` set - invisible to a ``to_tuple()``/``stringify()``
-    comparison alone (#8138).
-    """
-    return [
-        (seg.raw, tuple(sorted(seg.class_types)))
-        for seg in tree.recursive_crawl_all()
-        if not seg.segments
-    ]
+            segment_kwargs.append((seg.raw, *kwargs))
+        if not seg.segments:
+            class_types.append((seg.raw, tuple(sorted(seg.class_types))))
+        if seg.is_type("unparsable"):
+            has_unparsable = True
+    return segment_kwargs, has_unparsable, class_types
 
 
 def _exception_capture(err):
@@ -130,15 +133,31 @@ def _exception_capture(err):
 
 
 def _tree_capture(tree):
+    segment_kwargs, has_unparsable, class_types = _tree_fingerprints(tree)
     return (
         "tree",
         tree.to_tuple(**_TREE_TUPLE_KWARGS),
         tree.stringify(),
         tree.raw,
-        _segment_kwargs_fingerprint(tree),
-        any(tree.recursive_crawl("unparsable")),
-        _class_types_fingerprint(tree),
+        segment_kwargs,
+        has_unparsable,
+        class_types,
     )
+
+
+@lru_cache(maxsize=None)
+def _base_config(dialect):
+    """A fully-expanded FluffConfig for a dialect, cached across the suite.
+
+    Constructing a FluffConfig expands the dialect grammar (the expensive part,
+    ~3.5ms); ``.copy()`` shares that expanded ``dialect_obj`` and only re-copies
+    the small ``_configs`` dict (~0.15ms). The dialect-corpus sweep alone builds
+    one config per fixture (thousands), so caching the base and copying it saves
+    the bulk of that work.
+    """
+    from sqlfluff.core import FluffConfig
+
+    return FluffConfig(overrides={"dialect": dialect})
 
 
 def build_config(dialect="ansi", configs=None, extra_overrides=None):
@@ -150,6 +169,13 @@ def build_config(dialect="ansi", configs=None, extra_overrides=None):
     bool), a distinction at least one pinned bug depends on.
     """
     from sqlfluff.core import FluffConfig
+
+    # Fast path: a plain dialect (no extra overrides, no configs) is the
+    # overwhelming majority of calls. Hand out a cheap copy of the cached base
+    # so the dialect is expanded once per dialect, not once per fixture. The
+    # copy is independently mutable, so callers stay isolated.
+    if not configs and not extra_overrides:
+        return _base_config(dialect).copy()
 
     overrides = {"dialect": dialect}
     overrides.update(extra_overrides or {})
@@ -238,14 +264,15 @@ def linted_parse_capture(engine, sql, dialect="ansi", configs=None, context=None
         "tree": None,
     }
     if tree is not None:
+        segment_kwargs, has_unparsable, class_types = _tree_fingerprints(tree)
         capture["tree"] = tree.to_tuple(**_TREE_TUPLE_KWARGS)
         capture["stringify"] = re.sub(
             r"Block: '[0-9a-f]+'", "Block: '<uuid>'", tree.stringify()
         )
         capture["raw"] = tree.raw
-        capture["segment_kwargs"] = _segment_kwargs_fingerprint(tree)
-        capture["has_unparsable"] = any(tree.recursive_crawl("unparsable"))
-        capture["class_types"] = _class_types_fingerprint(tree)
+        capture["segment_kwargs"] = segment_kwargs
+        capture["has_unparsable"] = has_unparsable
+        capture["class_types"] = class_types
     return capture
 
 
@@ -406,17 +433,30 @@ def resolve_case_sql(case):
     return (DIALECT_FIXTURE_DIR / case["sql_fixture"]).read_text(encoding="utf-8")
 
 
+@lru_cache(maxsize=None)
+def _load_case_file(path_str):
+    """Parse one parity fixture file, cached by path.
+
+    ``load_case_params`` and ``load_reference_case_params`` each iterate every
+    fixture file for every kind, so without a cache the same YAML is re-parsed
+    several times per collection. The cached mapping is never mutated below
+    (``_meta`` is read, not popped), so the shared object is safe to reuse.
+    """
+    return yaml.safe_load(Path(path_str).read_text(encoding="utf-8"))
+
+
 def _iter_case_files(kind):
     for path in sorted(PARITY_CASE_DIR.glob("*.yml")):
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = _load_case_file(str(path))
         # An empty or comment-only fixture file parses to None (or an empty
         # mapping); skip it rather than crashing collection of the whole suite.
         if not data:
             continue
-        meta = data.pop("_meta", {})
+        meta = data.get("_meta", {})
         if meta.get("kind", "parser") != kind:
             continue
-        yield path, data
+        cases = {name: case for name, case in data.items() if name != "_meta"}
+        yield path, cases
 
 
 def load_case_params(kind, legs):
