@@ -4,19 +4,22 @@
     running the full test suite at each one, logging everything to a file.
 
 .DESCRIPTION
-    For each commit in (BaseCommit..original HEAD], oldest first:
+    Once, up front: uv pip install -e .   (main package, into the active venv)
+    Then for each commit in (BaseCommit..original HEAD], oldest first:
       1. git checkout <commit>
       2. uv pip install -e ./sqlfluffrs/   (rebuild + install the Rust extension)
-      3. uv run pytest test/               (run the full suite)
+      3. python -m pytest test/            (run the full suite)
     stdout/stderr from every step is appended to -LogFile, tagged with the
     commit hash/subject and a pass/fail marker. A build or test failure does
     not stop the walk - it's logged and the script moves to the next commit.
     The original branch/commit is checked back out when the walk finishes.
 
-    Requires `uv` on PATH. Run this with an activated Python venv that
-    already has `uv pip install -e .` done for the main package - this
-    script only rebuilds the Rust extension per commit, not the Python
-    package itself.
+    Requires `uv` on PATH and an activated Python venv. Tests run via a
+    plain `python -m pytest`, not `uv run` - uv run resolves its own
+    project-managed .venv independently of whatever venv is active, so
+    mixing it with `uv pip install` (which targets the active venv) means
+    the extension gets installed into one environment while tests run in
+    another, unrelated one that never had sqlfluff installed at all.
 
 .PARAMETER BaseCommit
     Commit to start after (exclusive). Defaults to ab292785.
@@ -47,6 +50,14 @@ if (-not $Commits) {
 "=== Bisect run started $(Get-Date -Format o) : $($Commits.Count) commits, base=$BaseCommit, ref=$OriginalRef ===" |
     Tee-Object -FilePath $LogFile -Append | Out-Null
 
+Add-Content -Path $LogFile -Value "`n--- one-time setup: uv pip install -e . ---"
+uv pip install -e . *>> $LogFile
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Initial 'uv pip install -e .' failed (exit $LASTEXITCODE) - see $LogFile"
+    Pop-Location
+    exit 1
+}
+
 foreach ($Commit in $Commits) {
     $Subject = git log -1 --format=%s $Commit
     $Header = "`n===== $Commit $Subject ($(Get-Date -Format o)) ====="
@@ -63,7 +74,7 @@ foreach ($Commit in $Commits) {
     }
 
     if ($BuildOk) {
-        uv run pytest test/ *>> $LogFile
+        python -m pytest test/ *>> $LogFile
         $TestExit = $LASTEXITCODE
         Add-Content -Path $LogFile -Value "--- RESULT for $Commit`: pytest exit $TestExit ---"
     }
