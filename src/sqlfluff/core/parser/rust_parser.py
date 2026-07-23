@@ -260,6 +260,33 @@ try:
                     if _prof is not None:
                         _prof["rust_core"] = time.perf_counter() - _ts
                 except RsParseError as e:
+                    # PYTHON PARITY: a dangling grammar ref - a keyword or
+                    # segment name the grammar references but the dialect never
+                    # registered - is signalled by the Rust core with a
+                    # "__MISSING_REF__:<name>" sentinel. Re-raise it through the
+                    # dialect's own ref(), which produces the exact RuntimeError
+                    # (keyword-not-found vs segment-not-found text, the dialect
+                    # name and the contribute-guide tip) the pure-Python parser
+                    # raises, so both engines fail identically.
+                    _missing_ref_prefix = "__MISSING_REF__:"
+                    _rs_desc = str(e)
+                    if _rs_desc.startswith(_missing_ref_prefix):
+                        ref_name = _rs_desc[len(_missing_ref_prefix) :]
+                        dialect_obj = self.config.get("dialect_obj")
+                        # ref() only raises when the dialect's Python library
+                        # never registered the name. If the name *is* in the
+                        # Python library, it was dropped from the Rust
+                        # codegen tables instead, so ref() returns normally
+                        # here rather than raising. Raise ourselves so the
+                        # user never sees the raw sentinel text.
+                        dialect_obj.ref(ref_name)
+                        raise RuntimeError(
+                            "Grammar refers to {!r} which is registered in "
+                            "the {} dialect's Python library but missing "
+                            "from its Rust parser tables. This is an "
+                            "internal sqlfluff bug; please raise an issue "
+                            "on GitHub.".format(ref_name, dialect_obj.name)
+                        ) from e
                     # Convert Rust parse error to SQLParseError with position info
                     raise SQLParseError.from_rs_parse_error(
                         e, segments[_start_idx:_end_idx]
